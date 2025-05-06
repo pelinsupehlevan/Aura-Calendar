@@ -14,9 +14,19 @@ class Database:
     def __init__(self):
         self.conn = None
         self.cursor = None
-        self.connect()
-        self.setup_pgvector()
-        self.setup_tables()
+        try:
+            self.connect()
+            self.setup_pgvector()
+            self.setup_tables()
+        except Exception as e:
+            print(f"Error initializing database: {e}")
+            # Clean up resources if initialization failed
+            if self.cursor:
+                self.cursor.close()
+            if self.conn:
+                self.conn.close()
+            # Re-raise the exception so caller knows initialization failed
+            raise
     
     def connect(self):
         """Establish connection to PostgreSQL database"""
@@ -151,6 +161,12 @@ class Database:
         try:
             print(f"Attempting to add event: {event_data}")
             
+            # Validate required fields
+            required_fields = ['title', 'start_time', 'end_time']
+            for field in required_fields:
+                if field not in event_data:
+                    raise ValueError(f"Missing required field: {field}")
+            
             query = """
                 INSERT INTO events 
                 (title, description, start_time, end_time, location, importance) 
@@ -180,6 +196,8 @@ class Database:
     def update_event(self, event_id: int, event_data: Dict) -> bool:
         """Update an existing event"""
         try:
+            print(f"Attempting to update event {event_id} with data: {event_data}")
+            
             # Create dynamic update query based on provided fields
             update_parts = []
             params = []
@@ -190,6 +208,7 @@ class Database:
                     params.append(value)
             
             if not update_parts:
+                print("No valid fields to update")
                 return False
                 
             query = f"""
@@ -202,6 +221,7 @@ class Database:
             self.cursor.execute(query, params)
             success = self.cursor.rowcount > 0
             self.conn.commit()
+            print(f"Event {event_id} update result: {success} (rows affected: {self.cursor.rowcount})")
             return success
         except Exception as e:
             print(f"Error updating event: {e}")
@@ -211,22 +231,55 @@ class Database:
     def delete_event(self, event_id: int) -> bool:
         """Delete an event from the calendar"""
         try:
+            print(f"Attempting to delete event with ID: {event_id}")
+            
+            # First, check if the event exists
+            check_query = "SELECT id, title FROM events WHERE id = %s;"
+            self.cursor.execute(check_query, (event_id,))
+            existing_event = self.cursor.fetchone()
+            
+            if not existing_event:
+                print(f"Event with ID {event_id} does not exist")
+                return False
+            
+            print(f"Found event to delete: {existing_event['title']} (ID: {existing_event['id']})")
+            
+            # Delete the event
             query = "DELETE FROM events WHERE id = %s;"
             self.cursor.execute(query, (event_id,))
-            success = self.cursor.rowcount > 0
+            deleted_count = self.cursor.rowcount
             self.conn.commit()
-            return success
+            
+            print(f"Delete query executed. Rows affected: {deleted_count}")
+            
+            if deleted_count > 0:
+                print(f"Successfully deleted event {event_id}")
+                return True
+            else:
+                print(f"No event was deleted for ID {event_id}")
+                return False
+            
         except Exception as e:
             print(f"Error deleting event: {e}")
+            import traceback
+            traceback.print_exc()
             self.conn.rollback()
             raise
     
     def get_event(self, event_id: int) -> Optional[Dict]:
         """Get a specific event by ID"""
         try:
+            print(f"Fetching event with ID: {event_id}")
             query = "SELECT * FROM events WHERE id = %s;"
             self.cursor.execute(query, (event_id,))
-            return self.cursor.fetchone()
+            event = self.cursor.fetchone()
+            
+            if event:
+                print(f"Found event: {event['title']} (ID: {event['id']})")
+                return dict(event)
+            else:
+                print(f"No event found with ID: {event_id}")
+                return None
         except Exception as e:
             print(f"Error getting event: {e}")
             raise
@@ -234,7 +287,7 @@ class Database:
     def get_events_in_range(self, start_time: datetime, end_time: datetime) -> List[Dict]:
         """Get all events within a specific time range"""
         try:
-            print(f"Database: Querying events from {start_time} to {end_time}")
+            print(f"Querying events from {start_time} to {end_time}")
             
             query = """
                 SELECT * FROM events 
@@ -247,14 +300,12 @@ class Database:
             self.cursor.execute(query, (start_time, end_time, start_time, end_time, start_time, end_time))
             
             events = self.cursor.fetchall()
-            print(f"Database: Found {len(events)} events")
+            print(f"Found {len(events)} events")
             
-            # Convert events to dictionary format
+            # Convert to list of dictionaries
             result = []
             for event in events:
-                # Convert RealDictRow to regular dict for easier handling
                 event_dict = dict(event)
-                print(f"Found event: {event_dict['title']} at {event_dict['start_time']}")
                 result.append(event_dict)
                 
             return result
@@ -262,11 +313,15 @@ class Database:
             print(f"Error getting events in range: {e}")
             import traceback
             traceback.print_exc()
-        return []  # Return empty list instead of raising to avoid UI errors
+            return []
     
     def check_conflicting_events(self, start_time: datetime, end_time: datetime, exclude_event_id: Optional[int] = None) -> List[Dict]:
         """Check for conflicting events in the specified time range"""
         try:
+            print(f"Checking for conflicts between {start_time} and {end_time}")
+            if exclude_event_id:
+                print(f"Excluding event ID: {exclude_event_id}")
+                
             exclude_clause = ""
             params = [start_time, end_time, start_time, end_time, start_time, end_time]
             
@@ -286,9 +341,22 @@ class Database:
             """
             
             self.cursor.execute(query, params)
-            return self.cursor.fetchall()
+            conflicts = self.cursor.fetchall()
+            
+            print(f"Found {len(conflicts)} conflicting events")
+            
+            # Convert to list of dictionaries
+            result = []
+            for conflict in conflicts:
+                conflict_dict = dict(conflict)
+                print(f"  - {conflict_dict['title']} at {conflict_dict['start_time']}")
+                result.append(conflict_dict)
+                
+            return result
         except Exception as e:
             print(f"Error checking conflicting events: {e}")
+            import traceback
+            traceback.print_exc()
             raise
     
     def store_memory(self, event_id: Optional[int], content: str, embedding: List[float]) -> int:
@@ -372,45 +440,6 @@ class Database:
             print(f"Error getting recent conversations: {e}")
             raise
     
-    def close(self):
-        """Close database connection"""
-        if self.cursor:
-            self.cursor.close()
-        if self.conn:
-            self.conn.close()
-            print("Database connection closed")
-
-    def get_events_in_range(self, start_time, end_time):
-        """Get all events within a specific time range"""
-        try:
-            print(f"Querying events from {start_time} to {end_time}")
-            
-            query = """
-                SELECT * FROM events 
-                WHERE 
-                    (start_time BETWEEN %s AND %s) OR
-                    (end_time BETWEEN %s AND %s) OR
-                    (start_time <= %s AND end_time >= %s)
-                ORDER BY start_time ASC;
-            """
-            self.cursor.execute(query, (start_time, end_time, start_time, end_time, start_time, end_time))
-            
-            events = self.cursor.fetchall()
-            print(f"Found {len(events)} events")
-            
-            # Convert to list of dictionaries
-            result = []
-            for event in events:
-                event_dict = dict(event)
-                result.append(event_dict)
-                
-            return result
-        except Exception as e:
-            print(f"Error getting events in range: {e}")
-            import traceback
-            traceback.print_exc()
-            return []
-
     def close(self):
         """Close database connections"""
         if self.cursor:

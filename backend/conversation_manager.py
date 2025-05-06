@@ -14,12 +14,11 @@ import asyncio
 import hashlib
 from model_mapper import map_db_event_to_api_event
 
-
 # Load environment variables
 load_dotenv()
 
 class ConversationManager:
-    def __init__(self):
+    def __init__(self, user_id: str = "default_user"):
         """Initialize the conversation manager with necessary components"""
         # Configure Gemini API
         api_key = os.getenv("GEMINI_API_KEY")
@@ -37,9 +36,36 @@ class ConversationManager:
         self.intent_classifier = IntentClassifier()
         self.importance_classifier = ImportanceClassifier()
         
+        # Store user ID for conversation history
+        self.user_id = user_id
+        
         # Initialize conversation state
         self.conversation_history = []
         self.current_event_context = None
+        
+        # Load conversation history from database
+        self.load_conversation_history()
+    
+    def load_conversation_history(self):
+        """Load conversation history from database for this user"""
+        try:
+            # Get recent conversations for this user
+            # We'll use a simple approach where user_message contains user_id
+            recent_conversations = self.db.get_recent_conversations(limit=10)
+            
+            # Filter for this user (simplified approach)
+            for conv in recent_conversations:
+                self.conversation_history.append({
+                    "user_message": conv["user_message"],
+                    "bot_response": conv["bot_response"],
+                    "timestamp": conv["timestamp"],
+                    "related_event_id": conv.get("related_event_id")
+                })
+            
+            print(f"Loaded {len(self.conversation_history)} previous conversations for user {self.user_id}")
+        except Exception as e:
+            print(f"Error loading conversation history: {e}")
+            self.conversation_history = []
     
     async def get_embedding(self, text: str) -> List[float]:
         """Get embeddings for text using Gemini model or fallback to a simple hash-based approach"""
@@ -100,19 +126,19 @@ class ConversationManager:
                 self.conversation_history[-5:] if self.conversation_history else None
             )
             
+            print(f"Classified intent: {intent_data}")
+            
             # Store for response generation
             event_data = None
             event_action = None
             conflict_info = None
+            related_event_id = None
             
             # Handle different intents
             if intent_data["intent"] == "GENERAL_CONVERSATION":
                 # For general conversation, just pass to response generation
                 pass
                 
-# In your conversation_manager.py, find the part that handles CREATE_EVENT intent
-# Add these debug prints:
-
             elif intent_data["intent"] == "CREATE_EVENT":
                 if intent_data.get("needs_clarification", False):
                     # We'll handle clarification in response generation
@@ -123,36 +149,220 @@ class ConversationManager:
                     event_details = intent_data.get("event_details", {})
                     print(f"Extracted event details: {event_details}")
                     
-                    if event_details and "start_time" in event_details and "end_time" in event_details:
-                        # ... rest of your event creation code ...
-                        try:
-                            event_id = self.db.add_event(event_details)
-                            print(f"Successfully created event with ID: {event_id}")
-                            event_details["id"] = event_id
-                            event_action = "created"
+                    # Ensure we have both start_time and end_time
+                    if "start_time" in event_details and isinstance(event_details["start_time"], datetime.datetime):
+                        # If end_time is missing, set it to 1 hour after start_time
+                        if "end_time" not in event_details or not isinstance(event_details["end_time"], datetime.datetime):
+                            event_details["end_time"] = event_details["start_time"] + timedelta(hours=1)
+                        
+                        # Classify importance if not already set
+                        if "importance" not in event_details:
+                            event_details["importance"] = await self.importance_classifier.classify_importance(
+                                event_details, 
+                                user_message
+                            )
+                        
+                        # Check for conflicts BEFORE creating the event
+                        conflicting_events = self.db.check_conflicting_events(
+                            event_details["start_time"], 
+                            event_details["end_time"]
+                        )
+                        
+                        if conflicting_events:
+                            print(f"Found {len(conflicting_events)} conflicting events")
+                            conflict_info = conflicting_events
+                            event_action = "conflict"
                             event_data = event_details
-                            
-                            # ... rest of your code ...
-                        except Exception as e:
-                            print(f"Error creating event: {e}")
+                        else:
+                            # No conflicts, create the event
+                            try:
+                                event_id = self.db.add_event(event_details)
+                                print(f"Successfully created event with ID: {event_id}")
+                                event_details["id"] = event_id
+                                event_action = "created"
+                                event_data = event_details
+                                related_event_id = event_id
+                                
+                                # Store memory for the event
+                                memory_content = (
+                                    f"Event '{event_details['title']}' scheduled for "
+                                    f"{event_details['start_time'].strftime('%Y-%m-%d %H:%M')} to "
+                                    f"{event_details['end_time'].strftime('%Y-%m-%d %H:%M')}. "
+                                    f"Importance: {event_details.get('importance', 5)}. "
+                                    f"Description: {event_details.get('description', 'No description')}"
+                                )
+                                embedding = await self.get_embedding(memory_content)
+                                self.db.store_memory(event_id, memory_content, embedding)
+                            except Exception as e:
+                                print(f"Error creating event: {e}")
+                                event_action = "error"
+                    else:
+                        print("Missing or invalid start_time for event creation")
+                        event_action = "needs_clarification"
                     
             elif intent_data["intent"] == "UPDATE_EVENT":
-                # ... Remaining update event logic ...
-                pass
+                # Handle event updates
+                print("Processing UPDATE_EVENT intent")
+                event_details = intent_data.get("event_details", {})
+                event_id = event_details.get("event_id")
+                
+                if event_id:
+                    print(f"Updating event ID: {event_id}")
+                    related_event_id = event_id
+                    # Check if updating time and if so, check for conflicts
+                    if "start_time" in event_details or "end_time" in event_details:
+                        # Get current event details
+                        current_event = self.db.get_event(event_id)
+                        
+                        if current_event:
+                            # Use current times if not being updated
+                            start_time = event_details.get("start_time", current_event["start_time"])
+                            end_time = event_details.get("end_time", current_event["end_time"])
+                            
+                            # Check for conflicts, excluding the current event
+                            conflicting_events = self.db.check_conflicting_events(
+                                start_time, 
+                                end_time, 
+                                exclude_event_id=event_id
+                            )
+                            
+                            if conflicting_events:
+                                conflict_info = conflicting_events
+                                event_action = "conflict"
+                                event_data = event_details
+                            else:
+                                # No conflicts, update the event
+                                success = self.db.update_event(event_id, event_details)
+                                if success:
+                                    event_action = "updated"
+                                    event_data = self.db.get_event(event_id)
+                                else:
+                                    event_action = "error"
+                        else:
+                            print(f"Event {event_id} not found for update")
+                            event_action = "not_found"
+                    else:
+                        # Just updating non-time fields
+                        success = self.db.update_event(event_id, event_details)
+                        if success:
+                            event_action = "updated"
+                            event_data = self.db.get_event(event_id)
+                        else:
+                            event_action = "error"
+                else:
+                    print("No event_id provided for update")
+                    event_action = "needs_clarification"
                 
             elif intent_data["intent"] == "DELETE_EVENT":
-                # ... Remaining delete event logic ...
-                pass
+                # Handle event deletion
+                print("Processing DELETE_EVENT intent")
+                event_details = intent_data.get("event_details", {})
+                event_id = event_details.get("event_id")
+                
+                if event_id:
+                    print(f"Attempting to delete event ID: {event_id}")
+                    # Get event details before deletion for confirmation
+                    event_before_deletion = self.db.get_event(event_id)
+                    
+                    if event_before_deletion:
+                        related_event_id = event_id
+                        success = self.db.delete_event(event_id)
+                        if success:
+                            print(f"Successfully deleted event {event_id}")
+                            event_action = "deleted"
+                            event_data = event_before_deletion  # Pass the original event data
+                        else:
+                            print(f"Failed to delete event {event_id}")
+                            event_action = "error"
+                    else:
+                        print(f"Event {event_id} not found for deletion")
+                        event_action = "not_found"
+                else:
+                    print("No event_id provided for deletion - need to search by title/description")
+                    # If no specific ID, try to find the event by title or description
+                    if "title" in event_details:
+                        # Search for events by title (this is a simplified approach)
+                        # You might want to implement a more sophisticated search
+                        all_events = self.db.get_events_in_range(
+                            datetime.datetime.now() - timedelta(days=30),
+                            datetime.datetime.now() + timedelta(days=365)
+                        )
+                        
+                        matching_events = [e for e in all_events if event_details["title"].lower() in e["title"].lower()]
+                        
+                        if len(matching_events) == 1:
+                            # Found exactly one match, delete it
+                            event_to_delete = matching_events[0]
+                            related_event_id = event_to_delete["id"]
+                            success = self.db.delete_event(event_to_delete["id"])
+                            if success:
+                                event_action = "deleted"
+                                event_data = event_to_delete
+                            else:
+                                event_action = "error"
+                        elif len(matching_events) > 1:
+                            # Multiple matches, need clarification
+                            event_action = "multiple_matches"
+                            event_data = {"matches": matching_events}
+                        else:
+                            # No matches found
+                            event_action = "not_found"
+                    else:
+                        event_action = "needs_clarification"
                 
             elif intent_data["intent"] == "QUERY_EVENT" or intent_data["intent"] == "CHECK_AVAILABILITY":
-                # ... Remaining query event logic ...
-                pass
+                # Handle querying events
+                event_details = intent_data.get("event_details", {})
+                
+                if "start_time" in event_details and "end_time" in event_details:
+                    events = self.db.get_events_in_range(
+                        event_details["start_time"], 
+                        event_details["end_time"]
+                    )
+                    event_action = "query"
+                    event_data = {"events": events}
+                else:
+                    # Default to showing next 7 days
+                    start_time = datetime.datetime.now()
+                    end_time = start_time + timedelta(days=7)
+                    events = self.db.get_events_in_range(start_time, end_time)
+                    event_action = "query"
+                    event_data = {"events": events, "default_range": True}
                 
             elif intent_data["intent"] == "RESCHEDULE_EVENT":
-                # ... Remaining reschedule event logic ...
-                pass
+                # Handle rescheduling
+                event_details = intent_data.get("event_details", {})
+                event_id = event_details.get("event_id")
+                
+                if event_id and "start_time" in event_details and "end_time" in event_details:
+                    related_event_id = event_id
+                    # Check for conflicts with new time
+                    conflicting_events = self.db.check_conflicting_events(
+                        event_details["start_time"], 
+                        event_details["end_time"], 
+                        exclude_event_id=event_id
+                    )
+                    
+                    if conflicting_events:
+                        conflict_info = conflicting_events
+                        event_action = "conflict"
+                        event_data = event_details
+                    else:
+                        # No conflicts, reschedule the event
+                        update_data = {
+                            "start_time": event_details["start_time"],
+                            "end_time": event_details["end_time"]
+                        }
+                        success = self.db.update_event(event_id, update_data)
+                        if success:
+                            event_action = "rescheduled"
+                            event_data = self.db.get_event(event_id)
+                        else:
+                            event_action = "error"
+                else:
+                    event_action = "needs_clarification"
             
-            # Generate response based on intent and actions taken - simplified for now
+            # Generate response based on intent and actions taken
             system_prompt = """
             You are an AI assistant for a calendar app called Aura Calendar. Your name is Aura.
             
@@ -163,81 +373,150 @@ class ConversationManager:
             2. If you've taken an action (created/updated/deleted an event), confirm it clearly
             3. If there are scheduling conflicts, explain them and suggest alternatives
             4. For general questions, be conversational and friendly
+            5. Always acknowledge what you've done (or failed to do)
+            6. Remember the conversation history and refer to it when appropriate
             
             Current date: {current_date}
             Current time: {current_time}
             
             Intent detected: {intent}
+            Action taken: {action}
+            
+            Recent conversation history:
+            {conversation_history}
             """
+            
+            # Create conversation history summary
+            history_text = ""
+            if len(self.conversation_history) > 0:
+                history_text = "Recent conversation:\n"
+                for conv in self.conversation_history[-3:]:  # Last 3 exchanges
+                    timestamp = conv['timestamp'].strftime('%Y-%m-%d %H:%M')
+                    history_text += f"[{timestamp}] User: {conv['user_message']}\n"
+                    history_text += f"[{timestamp}] You: {conv['bot_response']}\n"
             
             # Format the prompt
             formatted_prompt = system_prompt.format(
                 current_date=datetime.datetime.now().strftime('%Y-%m-%d'),
                 current_time=datetime.datetime.now().strftime('%H:%M'),
-                intent=intent_data["intent"]
+                intent=intent_data["intent"],
+                action=event_action or "none",
+                conversation_history=history_text
             )
             
-            # Add context information
-            if event_data:
-                formatted_prompt += f"\n\nEvent details: {json.dumps(event_data, default=str)}"
-                
-            if event_action:
-                formatted_prompt += f"\n\nAction: Event was {event_action}."
-                
-            if conflict_info:
-                formatted_prompt += "\n\nConflicting events:\n"
+            # Add context information based on the action
+            if event_action == "conflict" and conflict_info:
+                formatted_prompt += f"\n\nCONFLICT DETECTED with these events:\n"
                 for event in conflict_info:
                     formatted_prompt += (
-                        f"- {event['title']} at {event['start_time'].strftime('%Y-%m-%d %H:%M')} "
+                        f"- '{event['title']}' at {event['start_time'].strftime('%Y-%m-%d %H:%M')} "
+                        f"to {event['end_time'].strftime('%Y-%m-%d %H:%M')} "
                         f"(Importance: {event['importance']})\n"
                     )
+                formatted_prompt += "\nPlease inform the user about the conflict and ask what they'd like to do. They can:\n"
+                formatted_prompt += "1. Choose a different time\n"
+                formatted_prompt += "2. Replace one of the conflicting events\n"
+                formatted_prompt += "3. Cancel the new event\n"
+                
+            elif event_action == "created" and event_data:
+                formatted_prompt += f"\n\nSUCCESSFULLY CREATED event:\n"
+                formatted_prompt += f"- Title: '{event_data['title']}'\n"
+                formatted_prompt += f"- Time: {event_data['start_time'].strftime('%Y-%m-%d %H:%M')} to {event_data['end_time'].strftime('%Y-%m-%d %H:%M')}\n"
+                formatted_prompt += f"- Importance: {event_data.get('importance', 5)}\n"
+                
+            elif event_action == "deleted" and event_data:
+                formatted_prompt += f"\n\nSUCCESSFULLY DELETED event:\n"
+                formatted_prompt += f"- Title: '{event_data['title']}'\n"
+                formatted_prompt += f"- Time: {event_data['start_time'].strftime('%Y-%m-%d %H:%M')} to {event_data['end_time'].strftime('%Y-%m-%d %H:%M')}\n"
+                
+            elif event_action == "updated" or event_action == "rescheduled":
+                formatted_prompt += f"\n\nSUCCESSFULLY {event_action.upper()} event:\n"
+                if event_data:
+                    formatted_prompt += f"- Title: '{event_data['title']}'\n"
+                    formatted_prompt += f"- Time: {event_data['start_time'].strftime('%Y-%m-%d %H:%M')} to {event_data['end_time'].strftime('%Y-%m-%d %H:%M')}\n"
+                
+            elif event_action == "query" and event_data:
+                events = event_data.get("events", [])
+                formatted_prompt += f"\n\nFOUND {len(events)} events"
+                if event_data.get("default_range"):
+                    formatted_prompt += " in the next 7 days"
+                formatted_prompt += ":\n"
+                
+                for event in events:
+                    formatted_prompt += (
+                        f"- '{event['title']}' at {event['start_time'].strftime('%Y-%m-%d %H:%M')} "
+                        f"to {event['end_time'].strftime('%Y-%m-%d %H:%M')}\n"
+                    )
+                
+            elif event_action == "error":
+                formatted_prompt += f"\n\nERROR occurred while processing the request."
+                
+            elif event_action == "not_found":
+                formatted_prompt += f"\n\nNO MATCHING EVENT FOUND."
+                
+            elif event_action == "multiple_matches":
+                formatted_prompt += f"\n\nFOUND MULTIPLE MATCHING EVENTS - need clarification:\n"
+                if event_data and "matches" in event_data:
+                    for event in event_data["matches"]:
+                        formatted_prompt += (
+                            f"- '{event['title']}' at {event['start_time'].strftime('%Y-%m-%d %H:%M')} "
+                            f"(ID: {event['id']})\n"
+                        )
+                
+            elif event_action == "needs_clarification":
+                formatted_prompt += f"\n\nNEED MORE INFORMATION to complete this request."
             
             # Add the user message and generate response
-            formatted_prompt += f"\n\nUser message: {user_message}\n\nYour response:"
+            formatted_prompt += f"\n\nUser message: {user_message}\n\nYour response (be conversational and helpful):"
             
             # Generate response using Gemini
             response = await self.chat_model.generate_content_async(formatted_prompt)
             response_text = response.text
             
-            # Store the conversation
+            # Store the conversation in database AND memory
+            conversation_id = self.db.store_conversation(
+                user_message, 
+                response_text, 
+                related_event_id=related_event_id
+            )
+            
+            # Also add to in-memory conversation history
             self.conversation_history.append({
                 "user_message": user_message,
                 "bot_response": response_text,
                 "intent": intent_data["intent"],
-                "timestamp": datetime.datetime.now()
+                "timestamp": datetime.datetime.now(),
+                "related_event_id": related_event_id,
+                "id": conversation_id
             })
             
-            # Prepare the response object
+            # Keep conversation history limited to prevent memory issues
+            if len(self.conversation_history) > 50:
+                self.conversation_history = self.conversation_history[-50:]
+            
             # Prepare the response object
             response_data = {
                 "text": response_text,
                 "ui_action": None,
             }
-
             
-            if event_action in ["created", "updated", "rescheduled"] and isinstance(event_data, dict) and "id" in event_data:
+            # Add UI actions if needed
+            if event_action == "conflict":
+                response_data["ui_action"] = {
+                    "type": "show_conflict",
+                    "conflicts": conflict_info,
+                    "proposed_event": event_data
+                }
+            elif event_action in ["created", "updated", "rescheduled"] and isinstance(event_data, dict) and "id" in event_data:
                 print(f"Adding UI action for {event_action} event: {event_data}")
                 
                 # Convert the event data to the API model format
-                api_event = None
-                if "id" in event_data:
-                    # If this is an event object directly from this method
-                    api_event = {
-                        "event_id": event_data["id"],
-                        "title": event_data.get("title", ""),
-                        "description": event_data.get("description"),
-                        "start_time": event_data.get("start_time"),
-                        "end_time": event_data.get("end_time"),
-                        "location": event_data.get("location"),
-                        "importance": event_data.get("importance", 5),
-                        "status": "active"
-                    }
+                api_event = map_db_event_to_api_event(event_data)
                 
                 response_data["ui_action"] = {
                     "type": "update_calendar",
                     "event": api_event
                 }
-                print(f"Final response data: {response_data}")
             elif event_action == "deleted" and isinstance(event_data, dict) and "id" in event_data:
                 response_data["ui_action"] = {
                     "type": "remove_event",

@@ -49,9 +49,14 @@ class IntentClassifier:
         - description: Description of what the event is about
         - start_time: When the event starts (date and time)
         - end_time: When the event ends (date and time)
-        - duration: The time that event consumes (default : 60 minutes)
+        - duration: The time that event consumes (default: 60 minutes)
         - location: Where the event takes place (if mentioned)
         - event_id: If the user is referring to a specific existing event (if mentioned)
+        
+        For DELETE_EVENT intent, be especially careful to extract:
+        - event_id: If mentioned explicitly (like "delete event 5" or "cancel meeting 3")
+        - title: If they mention deleting by name (like "delete the basketball game" or "cancel my dentist appointment")
+        - Any other identifying information that could help find the event
         
         Return your analysis as a JSON object with these fields:
         - intent: One of the predefined intent types
@@ -61,6 +66,13 @@ class IntentClassifier:
         - clarification_question: Question to ask the user if clarification is needed
         
         Current date: {datetime.datetime.now().strftime('%Y-%m-%d')}
+        Current time: {datetime.datetime.now().strftime('%H:%M')}
+        
+        Examples of DELETE_EVENT messages:
+        - "delete the basketball game"
+        - "cancel my meeting with John"
+        - "remove the event on Friday"
+        - "delete event 5"
         """
         
         # Create the conversation history context
@@ -86,13 +98,29 @@ class IntentClassifier:
                 json_str = json_match.group(1)
             else:
                 # If no code block, try to find JSON directly
-                json_str = response_text
+                json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(0)
+                else:
+                    # Fallback: assume the entire response is JSON
+                    json_str = response_text
             
             # Clean up any extra text and parse JSON
-            result = json.loads(json_str)
+            try:
+                result = json.loads(json_str)
+            except json.JSONDecodeError:
+                # If JSON parsing fails, create a default response
+                print(f"Failed to parse JSON from response: {response_text}")
+                return {
+                    "intent": "GENERAL_CONVERSATION",
+                    "confidence": 0.5,
+                    "event_details": {},
+                    "needs_clarification": True,
+                    "clarification_question": "I'm not sure what you'd like me to do. Could you clarify?"
+                }
             
             # Validate intent type
-            if result['intent'] not in self.intent_types:
+            if result.get('intent') not in self.intent_types:
                 result['intent'] = 'GENERAL_CONVERSATION'
             
             # Process date and time strings into datetime objects if present
@@ -102,38 +130,43 @@ class IntentClassifier:
                 # Process start_time if present
                 if 'start_time' in event_details and event_details['start_time']:
                     try:
-                        # First try parsing in standard ISO format
-                        event_details['start_time'] = datetime.datetime.fromisoformat(
-                            event_details['start_time'].replace('Z', '+00:00')
-                        )
-                    except (ValueError, TypeError):
-                        try:
-                            # Try parsing in natural language
-                            event_details['start_time'] = self._parse_datetime(event_details['start_time'])
-                        except:
-                            # Keep as string if parsing fails
-                            pass
+                        event_details['start_time'] = self._parse_datetime(event_details['start_time'])
+                    except:
+                        # Keep as string if parsing fails
+                        pass
                 
                 # Process end_time if present
                 if 'end_time' in event_details and event_details['end_time']:
                     try:
-                        # First try parsing in standard ISO format
-                        event_details['end_time'] = datetime.datetime.fromisoformat(
-                            event_details['end_time'].replace('Z', '+00:00')
-                        )
-                    except (ValueError, TypeError):
-                        try:
-                            # Try parsing in natural language
-                            event_details['end_time'] = self._parse_datetime(event_details['end_time'])
-                        except:
-                            # Keep as string if parsing fails
-                            pass
+                        event_details['end_time'] = self._parse_datetime(event_details['end_time'])
+                    except:
+                        # Keep as string if parsing fails
+                        pass
+                
+                # For DELETE_EVENT, also try to parse event_id
+                if result['intent'] == "DELETE_EVENT" and 'event_id' in event_details:
+                    try:
+                        # Try to convert to integer if it's a string
+                        if isinstance(event_details['event_id'], str):
+                            event_details['event_id'] = int(event_details['event_id'])
+                    except ValueError:
+                        # If it can't be converted to int, keep as string (might be title)
+                        pass
                 
                 # If we have a start_time but no end_time, default to 1 hour later
                 if ('start_time' in event_details and 
                     isinstance(event_details['start_time'], datetime.datetime) and
                     ('end_time' not in event_details or not event_details['end_time'])):
-                    event_details['end_time'] = event_details['start_time'] + datetime.timedelta(hours=1)
+                    
+                    # Check if duration is specified
+                    duration_minutes = 60  # default
+                    if 'duration' in event_details:
+                        try:
+                            duration_minutes = int(event_details['duration'])
+                        except:
+                            pass
+                    
+                    event_details['end_time'] = event_details['start_time'] + datetime.timedelta(minutes=duration_minutes)
                     
                 result['event_details'] = event_details
             
@@ -163,19 +196,72 @@ class IntentClassifier:
         # Handle simple relative dates
         datetime_str = datetime_str.lower().strip()
         
+        # First check if this is already a valid ISO format
+        try:
+            # Try parsing as ISO format
+            return datetime.datetime.fromisoformat(datetime_str.replace('Z', '+00:00'))
+        except ValueError:
+            pass
+        
+        # Parse relative dates
         if "today" in datetime_str:
             base_date = today
         elif "tomorrow" in datetime_str:
             base_date = today + datetime.timedelta(days=1)
-        elif "next monday" in datetime_str:
-            days_ahead = 7 - today.weekday()
+        elif "yesterday" in datetime_str:
+            base_date = today - datetime.timedelta(days=1)
+        elif "next week" in datetime_str:
+            base_date = today + datetime.timedelta(days=7)
+        elif "monday" in datetime_str:
+            days_ahead = 0 - today.weekday()
+            if days_ahead <= 0:  # Target day already happened this week
+                days_ahead += 7
             base_date = today + datetime.timedelta(days=days_ahead)
-        # Add more relative date handling as needed
-        
+        elif "tuesday" in datetime_str:
+            days_ahead = 1 - today.weekday()
+            if days_ahead <= 0:
+                days_ahead += 7
+            base_date = today + datetime.timedelta(days=days_ahead)
+        elif "wednesday" in datetime_str:
+            days_ahead = 2 - today.weekday()
+            if days_ahead <= 0:
+                days_ahead += 7
+            base_date = today + datetime.timedelta(days=days_ahead)
+        elif "thursday" in datetime_str:
+            days_ahead = 3 - today.weekday()
+            if days_ahead <= 0:
+                days_ahead += 7
+            base_date = today + datetime.timedelta(days=days_ahead)
+        elif "friday" in datetime_str:
+            days_ahead = 4 - today.weekday()
+            if days_ahead <= 0:
+                days_ahead += 7
+            base_date = today + datetime.timedelta(days=days_ahead)
+        elif "saturday" in datetime_str:
+            days_ahead = 5 - today.weekday()
+            if days_ahead <= 0:
+                days_ahead += 7
+            base_date = today + datetime.timedelta(days=days_ahead)
+        elif "sunday" in datetime_str:
+            days_ahead = 6 - today.weekday()
+            if days_ahead <= 0:
+                days_ahead += 7
+            base_date = today + datetime.timedelta(days=days_ahead)
         else:
-            # This is very simplified - you would need more robust parsing here
-            # For now, return the current datetime as a fallback
-            return now
+            # Try to parse common date formats
+            for fmt in ['%Y-%m-%d', '%m/%d/%Y', '%d/%m/%Y', '%B %d %Y', '%B %d', '%d %B']:
+                try:
+                    parsed = datetime.datetime.strptime(datetime_str.split()[0], fmt)
+                    # If no year provided, use current year
+                    if parsed.year == 1900:
+                        parsed = parsed.replace(year=now.year)
+                    base_date = parsed
+                    break
+                except ValueError:
+                    continue
+            else:
+                # If nothing worked, return current time
+                return now
         
         # Try to extract time
         time_match = re.search(r'(\d{1,2}):(\d{2})\s*(am|pm)?', datetime_str, re.IGNORECASE)
@@ -191,6 +277,17 @@ class IntentClassifier:
                 hour = 0
                 
             return base_date.replace(hour=hour, minute=minute)
+        else:
+            # Check for relative times like "in 2 hours", "in 30 minutes"
+            hours_match = re.search(r'in\s+(\d+)\s+hours?', datetime_str)
+            if hours_match:
+                hours = int(hours_match.group(1))
+                return now + datetime.timedelta(hours=hours)
+                
+            mins_match = re.search(r'in\s+(\d+)\s+minutes?', datetime_str)
+            if mins_match:
+                minutes = int(mins_match.group(1))
+                return now + datetime.timedelta(minutes=minutes)
         
         # Default to 9am if no time specified
         return base_date.replace(hour=9, minute=0)

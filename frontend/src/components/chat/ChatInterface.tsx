@@ -2,13 +2,23 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { ChatMessage, apiService } from '@/services/api';
-import { ArrowUp, AlertCircle } from 'lucide-react';
+import { ChatMessage, apiService, Event } from '@/services/api';
+import { ArrowUp, AlertCircle, Calendar, Trash2, Edit } from 'lucide-react';
 import { toast } from 'sonner';
 import ApiError from '../ui/api-error';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { format, parseISO } from 'date-fns';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 
 // Key for storing chat history in localStorage
 const CHAT_HISTORY_KEY = 'aura-chat-history';
+
+interface ConflictAction {
+  type: 'show_conflict';
+  conflicts: Event[];
+  proposed_event: Partial<Event>;
+}
 
 const ChatInterface: React.FC = () => {
   // Initialize with default welcome message or stored history
@@ -47,6 +57,17 @@ const ChatInterface: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [apiError, setApiError] = useState<Error | null>(null);
   const [isBackendConnected, setIsBackendConnected] = useState<boolean | null>(null);
+  
+  // Conflict handling state
+  const [conflictDialog, setConflictDialog] = useState<{
+    open: boolean;
+    conflicts: Event[];
+    proposedEvent: Partial<Event>;
+  }>({
+    open: false,
+    conflicts: [],
+    proposedEvent: {}
+  });
   
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -123,6 +144,14 @@ const ChatInterface: React.FC = () => {
           case 'remove_event':
             toast.success('Event removed from calendar');
             break;
+          case 'show_conflict':
+            const conflictAction = response.ui_action as ConflictAction;
+            setConflictDialog({
+              open: true,
+              conflicts: conflictAction.conflicts,
+              proposedEvent: conflictAction.proposed_event
+            });
+            break;
           // Add more action types as needed
         }
       }
@@ -184,6 +213,46 @@ const ChatInterface: React.FC = () => {
       inputRef.current.style.height = `${Math.min(inputRef.current.scrollHeight, 150)}px`;
     }
   }, [inputMessage]);
+
+  // Handle conflict resolution
+  const handleConflictResolution = async (action: 'replace' | 'cancel', conflictToDelete?: Event) => {
+    if (action === 'cancel') {
+      setConflictDialog({ open: false, conflicts: [], proposedEvent: {} });
+      toast.info("Event creation cancelled");
+      
+      // Add a message to the chat
+      const message: ChatMessage = {
+        id: Date.now().toString(),
+        text: "I've cancelled the event creation due to the scheduling conflict.",
+        role: 'assistant',
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, message]);
+    } else if (action === 'replace' && conflictToDelete) {
+      // Delete the conflicting event and create the new one
+      try {
+        await apiService.deleteEvent(conflictToDelete.event_id);
+        
+        // Create the new event
+        const newEvent = await apiService.createEvent(conflictDialog.proposedEvent as Omit<Event, 'event_id' | 'status'>);
+        
+        setConflictDialog({ open: false, conflicts: [], proposedEvent: {} });
+        toast.success(`Replaced "${conflictToDelete.title}" with "${newEvent.title}"`);
+        
+        // Add a message to the chat
+        const message: ChatMessage = {
+          id: Date.now().toString(),
+          text: `I've deleted "${conflictToDelete.title}" and created "${newEvent.title}" as requested.`,
+          role: 'assistant',
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, message]);
+      } catch (error) {
+        console.error('Error resolving conflict:', error);
+        toast.error('Failed to resolve conflict. Please try again.');
+      }
+    }
+  };
 
   return (
     <div className="flex flex-col h-[calc(100vh-7rem)]">
@@ -269,6 +338,93 @@ const ChatInterface: React.FC = () => {
           </Button>
         </form>
       </div>
+
+      {/* Conflict Resolution Dialog */}
+      <AlertDialog open={conflictDialog.open} onOpenChange={(open) => setConflictDialog({...conflictDialog, open})}>
+        <AlertDialogContent className="max-w-2xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <AlertCircle className="h-5 w-5 text-yellow-500" />
+              Scheduling Conflict
+            </AlertDialogTitle>
+            <AlertDialogDescription className="pt-2">
+              The event "{conflictDialog.proposedEvent.title}" conflicts with existing events. What would you like to do?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          
+          <div className="py-4 space-y-4">
+            <div>
+              <h4 className="font-medium mb-2">Proposed Event:</h4>
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm">{conflictDialog.proposedEvent.title}</CardTitle>
+                </CardHeader>
+                <CardContent className="text-sm text-muted-foreground">
+                  <div className="flex items-center gap-2">
+                    <Calendar className="h-4 w-4" />
+                    {conflictDialog.proposedEvent.start_time && (
+                      <span>
+                        {format(new Date(conflictDialog.proposedEvent.start_time), 'MMM d, yyyy h:mm a')} - 
+                        {conflictDialog.proposedEvent.end_time && format(new Date(conflictDialog.proposedEvent.end_time), 'h:mm a')}
+                      </span>
+                    )}
+                  </div>
+                  {conflictDialog.proposedEvent.description && (
+                    <p className="mt-1">{conflictDialog.proposedEvent.description}</p>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+            
+            <div>
+              <h4 className="font-medium mb-2">Conflicting Events:</h4>
+              <div className="space-y-2">
+                {conflictDialog.conflicts.map((conflict) => (
+                  <Alert key={conflict.event_id} className="relative">
+                    <div className="pr-20">
+                      <div className="flex items-center gap-2 font-medium">
+                        {conflict.title}
+                        <span className="text-xs px-2 py-0.5 bg-secondary rounded">
+                          Importance: {conflict.importance}/10
+                        </span>
+                      </div>
+                      <div className="text-sm text-muted-foreground mt-1">
+                        {format(parseISO(conflict.start_time), 'MMM d, yyyy h:mm a')} - 
+                        {format(parseISO(conflict.end_time), 'h:mm a')}
+                      </div>
+                      {conflict.description && (
+                        <p className="text-sm text-muted-foreground mt-1">
+                          {conflict.description}
+                        </p>
+                      )}
+                    </div>
+                    <div className="absolute top-2 right-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleConflictResolution('replace', conflict)}
+                        className="gap-2"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                        Replace This
+                      </Button>
+                    </div>
+                  </Alert>
+                ))}
+              </div>
+            </div>
+          </div>
+          
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => handleConflictResolution('cancel')}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction onClick={() => setConflictDialog({...conflictDialog, open: false})}>
+              Keep Both (choose different time)
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 };
