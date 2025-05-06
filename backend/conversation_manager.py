@@ -12,7 +12,7 @@ import requests
 from datetime import timedelta
 import asyncio
 import hashlib
-from model_mapper import map_db_event_to_api_event
+from model_mapper import map_db_event_to_api_event, map_conflicts_to_api_format
 
 # Load environment variables
 load_dotenv()
@@ -43,24 +43,30 @@ class ConversationManager:
         self.conversation_history = []
         self.current_event_context = None
         
-        # Load conversation history from database
+        # Load conversation history from database - THIS IS THE KEY PART THAT WAS MISSING
         self.load_conversation_history()
     
     def load_conversation_history(self):
         """Load conversation history from database for this user"""
         try:
             # Get recent conversations for this user
-            # We'll use a simple approach where user_message contains user_id
-            recent_conversations = self.db.get_recent_conversations(limit=10)
+            recent_conversations = self.db.get_recent_conversations(limit=50)
             
-            # Filter for this user (simplified approach)
+            # Convert database format to our internal format
+            self.conversation_history = []
             for conv in recent_conversations:
+                # Add user message
                 self.conversation_history.append({
                     "user_message": conv["user_message"],
                     "bot_response": conv["bot_response"],
+                    "intent": None,  # We don't store intent in DB
                     "timestamp": conv["timestamp"],
-                    "related_event_id": conv.get("related_event_id")
+                    "related_event_id": conv.get("related_event_id"),
+                    "id": conv.get("id")
                 })
+            
+            # Reverse to get chronological order (oldest first)
+            self.conversation_history.reverse()
             
             print(f"Loaded {len(self.conversation_history)} previous conversations for user {self.user_id}")
         except Exception as e:
@@ -120,6 +126,10 @@ class ConversationManager:
             Dictionary with bot response and any actions to take
         """
         try:
+            # Ensure conversation history is loaded
+            if not self.conversation_history:
+                self.load_conversation_history()
+            
             # Classify intent
             intent_data = await self.intent_classifier.classify_intent(
                 user_message, 
@@ -406,6 +416,8 @@ class ConversationManager:
             
             # Add context information based on the action
             if event_action == "conflict" and conflict_info:
+                # For conflicts, we'll let the UI handle it via the dialog
+                # Just provide a simple acknowledgment message
                 formatted_prompt += f"\n\nCONFLICT DETECTED with these events:\n"
                 for event in conflict_info:
                     formatted_prompt += (
@@ -413,10 +425,7 @@ class ConversationManager:
                         f"to {event['end_time'].strftime('%Y-%m-%d %H:%M')} "
                         f"(Importance: {event['importance']})\n"
                     )
-                formatted_prompt += "\nPlease inform the user about the conflict and ask what they'd like to do. They can:\n"
-                formatted_prompt += "1. Choose a different time\n"
-                formatted_prompt += "2. Replace one of the conflicting events\n"
-                formatted_prompt += "3. Cancel the new event\n"
+                formatted_prompt += "\nThe system will show a conflict resolution dialog. Please acknowledge that there's a conflict and that the user will be prompted to resolve it."
                 
             elif event_action == "created" and event_data:
                 formatted_prompt += f"\n\nSUCCESSFULLY CREATED event:\n"

@@ -322,23 +322,30 @@ class Database:
             if exclude_event_id:
                 print(f"Excluding event ID: {exclude_event_id}")
                 
-            exclude_clause = ""
-            params = [start_time, end_time, start_time, end_time, start_time, end_time]
+            # Fixed conflict detection to properly handle adjacent events
+            # Events are considered conflicting if:
+            # 1. New event starts before existing event ends AND new event ends after existing event starts
+            # This excludes cases where one event ends exactly when another starts
             
             if exclude_event_id is not None:
-                exclude_clause = "AND id != %s"
-                params.append(exclude_event_id)
-                
-            query = f"""
-                SELECT * FROM events 
-                WHERE 
-                    ((start_time BETWEEN %s AND %s) OR
-                    (end_time BETWEEN %s AND %s) OR
-                    (start_time <= %s AND end_time >= %s))
-                    AND status = 'active'
-                    {exclude_clause}
-                ORDER BY importance DESC, start_time ASC;
-            """
+                query = """
+                    SELECT * FROM events 
+                    WHERE 
+                        (start_time < %s AND end_time > %s)
+                        AND status = 'active'
+                        AND id != %s
+                    ORDER BY importance DESC, start_time ASC;
+                """
+                params = [end_time, start_time, exclude_event_id]
+            else:
+                query = """
+                    SELECT * FROM events 
+                    WHERE 
+                        (start_time < %s AND end_time > %s)
+                        AND status = 'active'
+                    ORDER BY importance DESC, start_time ASC;
+                """
+                params = [end_time, start_time]
             
             self.cursor.execute(query, params)
             conflicts = self.cursor.fetchall()
@@ -349,7 +356,7 @@ class Database:
             result = []
             for conflict in conflicts:
                 conflict_dict = dict(conflict)
-                print(f"  - {conflict_dict['title']} at {conflict_dict['start_time']}")
+                print(f"  - {conflict_dict['title']} at {conflict_dict['start_time']} to {conflict_dict['end_time']}")
                 result.append(conflict_dict)
                 
             return result

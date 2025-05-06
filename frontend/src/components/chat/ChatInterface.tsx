@@ -23,30 +23,12 @@ interface ConflictAction {
 const ChatInterface: React.FC = () => {
   // Initialize with default welcome message or stored history
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
-    // Try to load from localStorage
-    const savedMessages = localStorage.getItem(CHAT_HISTORY_KEY);
-    if (savedMessages) {
-      try {
-        // Parse and validate the saved messages
-        const parsedMessages = JSON.parse(savedMessages);
-        
-        // Convert string timestamps back to Date objects
-        if (Array.isArray(parsedMessages) && parsedMessages.length > 0) {
-          return parsedMessages.map(msg => ({
-            ...msg,
-            timestamp: new Date(msg.timestamp)
-          }));
-        }
-      } catch (error) {
-        console.error('Error parsing saved chat history:', error);
-      }
-    }
-    
-    // Default welcome message if no history or invalid history
+    // We'll load both from localStorage and then sync with backend
+    // For now, start with a welcome message
     return [
       {
         id: '1',
-        text: "Hi there! I'm Aura, your smart calendar assistant. How can I help you today?",
+        text: "Hi there! I'm Aura, your smart calendar assistant. I can remember our previous conversations. How can I help you today?",
         role: 'assistant',
         timestamp: new Date(),
       },
@@ -57,6 +39,7 @@ const ChatInterface: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [apiError, setApiError] = useState<Error | null>(null);
   const [isBackendConnected, setIsBackendConnected] = useState<boolean | null>(null);
+  const [conversationLoaded, setConversationLoaded] = useState(false);
   
   // Conflict handling state
   const [conflictDialog, setConflictDialog] = useState<{
@@ -74,25 +57,55 @@ const ChatInterface: React.FC = () => {
 
   // Save messages to localStorage whenever they change
   useEffect(() => {
-    localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(messages));
-  }, [messages]);
+    // Only save messages after conversation is loaded to avoid overwriting
+    if (conversationLoaded) {
+      localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(messages));
+    }
+  }, [messages, conversationLoaded]);
 
-  // Check backend connection on mount
+  // Load conversation history from both localStorage and backend
   useEffect(() => {
-    const checkConnection = async () => {
+    const loadConversationHistory = async () => {
       try {
+        // First load from localStorage
+        const savedMessages = localStorage.getItem(CHAT_HISTORY_KEY);
+        if (savedMessages) {
+          try {
+            const parsedMessages = JSON.parse(savedMessages);
+            if (Array.isArray(parsedMessages) && parsedMessages.length > 0) {
+              setMessages(parsedMessages.map(msg => ({
+                ...msg,
+                timestamp: new Date(msg.timestamp)
+              })));
+            }
+          } catch (error) {
+            console.error('Error parsing saved chat history:', error);
+          }
+        }
+
+        // Check backend connection
         const isConnected = await apiService.checkApiHealth();
         setIsBackendConnected(isConnected);
+        
         if (!isConnected) {
           setApiError(new Error("Could not connect to the backend server"));
+          setConversationLoaded(true);
+          return;
         }
+
+        // If backend is connected, try to sync the conversation
+        // Note: There's no direct API endpoint to get chat history,
+        // but the backend conversation manager will load it automatically
+        // when processing the first message
+        setConversationLoaded(true);
       } catch (error) {
         setIsBackendConnected(false);
         setApiError(error instanceof Error ? error : new Error("Connection error"));
+        setConversationLoaded(true);
       }
     };
-    
-    checkConnection();
+
+    loadConversationHistory();
   }, []);
 
   const scrollToBottom = () => {
@@ -122,7 +135,7 @@ const ChatInterface: React.FC = () => {
     setApiError(null);
     
     try {
-      // Send message to API
+      // Send message to API - backend will automatically load conversation history
       const response = await apiService.sendMessage(userMessage.text);
       
       // Add assistant response to the chat
@@ -231,6 +244,12 @@ const ChatInterface: React.FC = () => {
     } else if (action === 'replace' && conflictToDelete) {
       // Delete the conflicting event and create the new one
       try {
+        // Make sure we have a valid event ID
+        if (!conflictToDelete.event_id || conflictToDelete.event_id === undefined) {
+          throw new Error('Invalid event ID');
+        }
+        
+        console.log(`Attempting to delete event with ID: ${conflictToDelete.event_id}`);
         await apiService.deleteEvent(conflictToDelete.event_id);
         
         // Create the new event
@@ -250,6 +269,15 @@ const ChatInterface: React.FC = () => {
       } catch (error) {
         console.error('Error resolving conflict:', error);
         toast.error('Failed to resolve conflict. Please try again.');
+        
+        // Add error message to chat
+        const errorMessage: ChatMessage = {
+          id: Date.now().toString(),
+          text: "Sorry, I encountered an error while trying to resolve the conflict. Please try again.",
+          role: 'assistant',
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, errorMessage]);
       }
     }
   };

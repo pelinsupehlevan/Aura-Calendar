@@ -7,7 +7,7 @@ def map_db_event_to_api_event(db_event: Dict) -> Dict:
     
     # Create a new dictionary with the correct field names
     api_event = {
-        "event_id": db_event.get("id"),
+        "event_id": db_event.get("id"),  # Make sure we map 'id' to 'event_id'
         "title": db_event.get("title", ""),
         "description": db_event.get("description"),
         "start_time": db_event.get("start_time"),
@@ -25,3 +25,13 @@ def map_many_db_events_to_api_events(db_events: List[Dict]) -> List[Dict]:
         return []
     
     return [map_db_event_to_api_event(event) for event in db_events]
+
+def map_conflicts_to_api_format(conflicts: List[Dict]) -> List[Dict]:
+    """Map conflict events to ensure they have the correct format for the frontend"""
+    mapped_conflicts = []
+    for conflict in conflicts:
+        if isinstance(conflict, dict):
+            mapped_conflict = map_db_event_to_api_event(conflict)
+            if mapped_conflict:
+                mapped_conflicts.append(mapped_conflict)
+    return mapped_conflicts
