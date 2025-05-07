@@ -126,6 +126,7 @@ class ConversationManager:
         Returns:
             Tuple of (event_action, event_data)
         """
+        # Get event_details from intent_data, using an empty dict as default if not present
         event_details = intent_data.get("event_details", {})
         
         if "start_time" in event_details and "end_time" in event_details:
@@ -406,6 +407,9 @@ class ConversationManager:
                 # Use the improved handler
                 event_action, event_data = self.handle_query_events(intent_data)
                 
+                # Remove or comment out this problematic section that tries to access event_details directly
+                # This is the source of the error because event_details isn't defined in this scope
+                """
                 if "start_time" in event_details and "end_time" in event_details:
                     events = self.db.get_events_in_range(
                         event_details["start_time"], 
@@ -420,6 +424,7 @@ class ConversationManager:
                     events = self.db.get_events_in_range(start_time, end_time)
                     event_action = "query"
                     event_data = {"events": events, "default_range": True}
+                """
                 
             elif intent_data["intent"] == "RESCHEDULE_EVENT":
                 # Handle rescheduling
