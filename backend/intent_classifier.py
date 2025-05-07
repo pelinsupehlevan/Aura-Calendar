@@ -13,7 +13,7 @@ class IntentClassifier:
     def __init__(self):
         """Initialize the intent classifier with Gemini API"""
         genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-        self.model = genai.GenerativeModel('gemini-1.5-pro')
+        self.model = genai.GenerativeModel('gemini-2.0-flash-lite')
         
         # Define the intents we want to recognize
         self.intent_types = [
@@ -203,6 +203,41 @@ class IntentClassifier:
         except ValueError:
             pass
         
+        # Check for "next week" explicitly
+        if "next week" in datetime_str:
+            # Start of next week (next Monday)
+            today_weekday = today.weekday()  # 0 is Monday, 6 is Sunday
+            days_until_next_monday = 7 - today_weekday if today_weekday > 0 else 7
+            next_monday = today + datetime.timedelta(days=days_until_next_monday)
+            return next_monday
+        
+        # Check for specific date (like "10th May")
+        date_pattern = r'(\d{1,2})(st|nd|rd|th)?\s+(of\s+)?(january|february|march|april|may|june|july|august|september|october|november|december)'
+        date_match = re.search(date_pattern, datetime_str, re.IGNORECASE)
+        if date_match:
+            day = int(date_match.group(1))
+            month_name = date_match.group(4).lower()
+            months = {
+                'january': 1, 'february': 2, 'march': 3, 'april': 4,
+                'may': 5, 'june': 6, 'july': 7, 'august': 8,
+                'september': 9, 'october': 10, 'november': 11, 'december': 12
+            }
+            month = months[month_name]
+            year = now.year
+            
+            # Set the date to the specified day
+            try:
+                date = datetime.datetime(year, month, day)
+                # If the date is in the past, assume next year
+                if date < now and (month < now.month or (month == now.month and day < now.day)):
+                    date = datetime.datetime(year + 1, month, day)
+                    
+                # For specific date queries with no time, set to midnight
+                return date.replace(hour=0, minute=0, second=0, microsecond=0)
+            except ValueError:
+                # Invalid date (e.g., February 31)
+                pass
+        
         # Parse relative dates
         if "today" in datetime_str:
             base_date = today
@@ -210,8 +245,6 @@ class IntentClassifier:
             base_date = today + datetime.timedelta(days=1)
         elif "yesterday" in datetime_str:
             base_date = today - datetime.timedelta(days=1)
-        elif "next week" in datetime_str:
-            base_date = today + datetime.timedelta(days=7)
         elif "monday" in datetime_str:
             days_ahead = 0 - today.weekday()
             if days_ahead <= 0:  # Target day already happened this week

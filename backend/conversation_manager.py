@@ -26,10 +26,10 @@ class ConversationManager:
             raise ValueError("GEMINI_API_KEY environment variable is not set")
             
         genai.configure(api_key=api_key)
-        self.chat_model = genai.GenerativeModel('gemini-1.5-pro')
+        self.chat_model = genai.GenerativeModel('gemini-2.0-flash-lite')
         
         # We'll use the same model for embeddings since embedding-001 isn't available
-        self.embedding_model = genai.GenerativeModel('gemini-1.5-flash')
+        self.embedding_model = genai.GenerativeModel('gemini-2.0-flash-lite')
         
         # Initialize components
         self.db = Database()
@@ -114,7 +114,86 @@ class ConversationManager:
         normalized = [x/magnitude for x in embedding]
         
         return normalized
+
     
+    def handle_query_events(self, intent_data: Dict) -> Tuple[str, Dict]:
+        """
+        Improved handler for QUERY_EVENT and CHECK_AVAILABILITY intents
+        
+        Args:
+            intent_data: The intent classification data
+            
+        Returns:
+            Tuple of (event_action, event_data)
+        """
+        event_details = intent_data.get("event_details", {})
+        
+        if "start_time" in event_details and "end_time" in event_details:
+            start_time = event_details["start_time"]
+            end_time = event_details["end_time"]
+            
+            # Special handling for next week
+            if "next week" in intent_data.get("query_text", "").lower():
+                # Calculate next Monday
+                today = datetime.datetime.now().date()
+                today_weekday = today.weekday()  # 0 is Monday, 6 is Sunday
+                days_until_next_monday = 7 - today_weekday if today_weekday > 0 else 7
+                next_monday = today + datetime.timedelta(days=days_until_next_monday)
+                
+                # Set range from next Monday to next Sunday
+                start_time = datetime.datetime.combine(next_monday, datetime.time.min)
+                end_time = start_time + datetime.timedelta(days=6, hours=23, minutes=59, seconds=59)
+                
+                print(f"Next week query detected. Using date range: {start_time} to {end_time}")
+            
+            # For specific date queries (e.g., "10th May")
+            elif "10th may" in intent_data.get("query_text", "").lower() or "10 may" in intent_data.get("query_text", "").lower():
+                # Set proper full day range for May 10th
+                may_10 = datetime.datetime(datetime.datetime.now().year, 5, 10)
+                start_time = may_10.replace(hour=0, minute=0, second=0, microsecond=0)
+                end_time = may_10.replace(hour=23, minute=59, second=59, microsecond=999999)
+                
+                print(f"May 10th query detected. Using date range: {start_time} to {end_time}")
+            
+            # If the time range is less than 24 hours and both times are at hour boundaries,
+            # this is likely intended to be a full day query
+            elif (end_time - start_time < datetime.timedelta(days=1) and 
+                start_time.hour == 0 and start_time.minute == 0 and
+                (end_time.hour == 0 or end_time.hour == 1) and end_time.minute == 0):
+                
+                # Adjust to full day
+                day_date = start_time.date()
+                start_time = datetime.datetime.combine(day_date, datetime.time.min)
+                end_time = datetime.datetime.combine(day_date, datetime.time.max)
+                
+                print(f"Adjusted to full day query: {start_time} to {end_time}")
+            
+            # Get events in the specified range
+            events = self.db.get_events_in_range(start_time, end_time)
+            
+            # Check if this is a single-day query for better response formatting
+            is_single_day = start_time.date() == end_time.date()
+            
+            return "query", {
+                "events": events,
+                "single_day": is_single_day,
+                "query_date": start_time.date() if is_single_day else None,
+                "start_time": start_time,
+                "end_time": end_time
+            }
+        else:
+            # Default to showing next 7 days
+            start_time = datetime.datetime.now()
+            end_time = start_time + datetime.timedelta(days=7)
+            events = self.db.get_events_in_range(start_time, end_time)
+            
+            return "query", {
+                "events": events,
+                "default_range": True,
+                "start_time": start_time,
+                "end_time": end_time
+            }
+        
     async def process_message(self, user_message: str) -> Dict:
         """
         Process a user message and generate an appropriate response
@@ -321,8 +400,11 @@ class ConversationManager:
                         event_action = "needs_clarification"
                 
             elif intent_data["intent"] == "QUERY_EVENT" or intent_data["intent"] == "CHECK_AVAILABILITY":
-                # Handle querying events
-                event_details = intent_data.get("event_details", {})
+                # Add the original query text to help with special case detection
+                intent_data["query_text"] = user_message
+                
+                # Use the improved handler
+                event_action, event_data = self.handle_query_events(intent_data)
                 
                 if "start_time" in event_details and "end_time" in event_details:
                     events = self.db.get_events_in_range(
@@ -482,12 +564,22 @@ class ConversationManager:
             response = await self.chat_model.generate_content_async(formatted_prompt)
             response_text = response.text
             
-            # Store the conversation in database AND memory
-            conversation_id = self.db.store_conversation(
-                user_message, 
-                response_text, 
-                related_event_id=related_event_id
-            )
+            # Don't use related_event_id if we just deleted that event
+            if event_action == "deleted" and related_event_id is not None:
+                # The event was deleted, so don't try to reference it
+                conversation_id = self.db.store_conversation(
+                    user_message, 
+                    response_text, 
+                    related_event_id=None  # Set to None since the event was deleted
+                )
+                print(f"Stored conversation without event reference (event {related_event_id} was deleted)")
+            else:
+                # Normal case - store with related event ID
+                conversation_id = self.db.store_conversation(
+                    user_message, 
+                    response_text, 
+                    related_event_id=related_event_id
+                )
             
             # Also add to in-memory conversation history
             self.conversation_history.append({

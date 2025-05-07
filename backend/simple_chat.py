@@ -17,7 +17,7 @@ class SimpleChat:
             raise ValueError("GEMINI_API_KEY environment variable is not set")
             
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-1.5-pro')
+        self.model = genai.GenerativeModel('gemini-2.0-flash-lite')
         
         # Simple conversation history
         self.history = []

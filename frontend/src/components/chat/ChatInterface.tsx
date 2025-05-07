@@ -28,7 +28,7 @@ const ChatInterface: React.FC = () => {
     return [
       {
         id: '1',
-        text: "Hi there! I'm Aura, your smart calendar assistant. I can remember our previous conversations. How can I help you today?",
+        text: "Hey Hi Hello Yo Whatsup! I'm Aura, your smart calendar assistant. I can remember our previous conversations. How can I help you today?",
         role: 'assistant',
         timestamp: new Date(),
       },
@@ -135,9 +135,14 @@ const ChatInterface: React.FC = () => {
     setApiError(null);
     
     try {
-      // Send message to API - backend will automatically load conversation history
+      // Send message to API
       const response = await apiService.sendMessage(userMessage.text);
       
+      // Check if this is a fallback/simplified mode response
+      const isQuotaLimitResponse = 
+        response.text.includes("API rate limits") || 
+        response.text.includes("simplified mode");
+        
       // Add assistant response to the chat
       const assistantMessage: ChatMessage = {
         id: (Date.now() + 1).toString(),
@@ -148,7 +153,16 @@ const ChatInterface: React.FC = () => {
       
       setMessages((prev) => [...prev, assistantMessage]);
       
+      // If this is a quota limit response, show a toast warning
+      if (isQuotaLimitResponse) {
+        toast.warning(
+          "Aura has hit API quota limits and is running in simplified mode. Calendar features are limited.", 
+          { duration: 5000 }
+        );
+      }
+      
       // Handle any UI actions from the response
+      // Note: In fallback mode, UI actions will be null
       if (response.ui_action) {
         switch (response.ui_action.type) {
           case 'update_calendar':
@@ -229,8 +243,10 @@ const ChatInterface: React.FC = () => {
 
   // Handle conflict resolution
   const handleConflictResolution = async (action: 'replace' | 'cancel', conflictToDelete?: Event) => {
+    // Always close the dialog first, regardless of action
+    setConflictDialog({ open: false, conflicts: [], proposedEvent: {} });
+    
     if (action === 'cancel') {
-      setConflictDialog({ open: false, conflicts: [], proposedEvent: {} });
       toast.info("Event creation cancelled");
       
       // Add a message to the chat
@@ -242,20 +258,46 @@ const ChatInterface: React.FC = () => {
       };
       setMessages((prev) => [...prev, message]);
     } else if (action === 'replace' && conflictToDelete) {
+      // Show a loading toast to indicate processing
+      toast.loading("Processing conflict resolution...");
+      
       // Delete the conflicting event and create the new one
       try {
-        // Make sure we have a valid event ID
-        if (!conflictToDelete.event_id || conflictToDelete.event_id === undefined) {
-          throw new Error('Invalid event ID');
+        // Debug the event object
+        console.log("Conflict to delete:", conflictToDelete);
+        console.log("Event ID:", typeof conflictToDelete.event_id, conflictToDelete.event_id);
+        
+        // Make sure we have a valid event ID - if not, try to get it from id property
+        let eventId = conflictToDelete.event_id;
+        
+        // Try alternate property names if event_id is undefined
+        if (eventId === undefined) {
+          // @ts-ignore - Some backend implementations might use 'id' instead of 'event_id'
+          eventId = conflictToDelete.id;
+          console.log("Using alternate id property:", eventId);
         }
         
-        console.log(`Attempting to delete event with ID: ${conflictToDelete.event_id}`);
-        await apiService.deleteEvent(conflictToDelete.event_id);
+        // If we still don't have an ID, try to find it in another way
+        if (eventId === undefined) {
+          toast.error("Could not find a valid ID for the event to delete");
+          throw new Error('No valid event ID found');
+        }
+        
+        // Convert eventId to number if it's a string
+        const numericId = typeof eventId === 'string' ? parseInt(eventId, 10) : eventId;
+        
+        if (isNaN(numericId)) {
+          throw new Error(`Invalid event ID format: ${eventId}`);
+        }
+        
+        console.log(`Attempting to delete event with ID: ${numericId}`);
+        await apiService.deleteEvent(numericId);
         
         // Create the new event
         const newEvent = await apiService.createEvent(conflictDialog.proposedEvent as Omit<Event, 'event_id' | 'status'>);
         
-        setConflictDialog({ open: false, conflicts: [], proposedEvent: {} });
+        // Dismiss loading toast and show success
+        toast.dismiss();
         toast.success(`Replaced "${conflictToDelete.title}" with "${newEvent.title}"`);
         
         // Add a message to the chat
@@ -267,18 +309,29 @@ const ChatInterface: React.FC = () => {
         };
         setMessages((prev) => [...prev, message]);
       } catch (error) {
+        // Dismiss loading toast and show error
+        toast.dismiss();
         console.error('Error resolving conflict:', error);
         toast.error('Failed to resolve conflict. Please try again.');
         
         // Add error message to chat
         const errorMessage: ChatMessage = {
           id: Date.now().toString(),
-          text: "Sorry, I encountered an error while trying to resolve the conflict. Please try again.",
+          text: `Sorry, I encountered an error while trying to resolve the conflict: ${error instanceof Error ? error.message : 'Unknown error'}. Please try again with a different time for your event.`,
           role: 'assistant',
           timestamp: new Date(),
         };
         setMessages((prev) => [...prev, errorMessage]);
       }
+    } else {
+      // If we reach here, it means the user clicked "Keep Both"
+      const message: ChatMessage = {
+        id: Date.now().toString(),
+        text: "I've kept both events. Please choose a different time for your new event to avoid conflicts.",
+        role: 'assistant',
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, message]);
     }
   };
 
@@ -408,7 +461,7 @@ const ChatInterface: React.FC = () => {
               <h4 className="font-medium mb-2">Conflicting Events:</h4>
               <div className="space-y-2">
                 {conflictDialog.conflicts.map((conflict) => (
-                  <Alert key={conflict.event_id} className="relative">
+                  <Alert key={`conflict-${conflict.event_id || conflict.title}`} className="relative">
                     <div className="pr-20">
                       <div className="flex items-center gap-2 font-medium">
                         {conflict.title}

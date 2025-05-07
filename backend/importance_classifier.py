@@ -11,7 +11,7 @@ class ImportanceClassifier:
     def __init__(self):
         """Initialize the importance classifier with Gemini API"""
         genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-        self.model = genai.GenerativeModel('gemini-1.5-pro')
+        self.model = genai.GenerativeModel('gemini-2.0-flash-lite')
         
         # Define importance scale
         self.importance_scale = {
