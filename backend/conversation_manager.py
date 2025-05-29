@@ -121,175 +121,148 @@ class ConversationManager:
         return normalized
 
     def extract_context_from_recent_messages(self) -> Dict[str, Any]:
-        """Extract event context from recent conversation history"""
+        """Extract event context from recent conversation history - IMPROVED VERSION"""
         context = {}
         
         # Look at the last few messages for event-related information
         recent_messages = self.conversation_history[-5:] if self.conversation_history else []
         
+        # Clear any phantom context first
         for msg in recent_messages:
             user_msg = msg.get('user_message', '').lower()
             bot_msg = msg.get('bot_response', '').lower()
             
-            # Look for event titles in recent messages
-            if 'coffee' in user_msg or 'coffee' in bot_msg:
-                context['title'] = 'coffee date with my sister'
-            elif 'gym' in user_msg or 'gym' in bot_msg:
-                context['title'] = 'gym session'
-            elif 'meeting' in user_msg or 'meeting' in bot_msg:
-                context['title'] = 'meeting'
-            elif 'lunch' in user_msg or 'lunch' in bot_msg:
-                context['title'] = 'lunch'
-            elif 'dinner' in user_msg or 'dinner' in bot_msg:
-                context['title'] = 'dinner'
-            
-            # Look for people/relationships
-            if 'sister' in user_msg or 'sister' in bot_msg:
-                if 'title' not in context:
-                    context['title'] = 'event with sister'
-                elif 'sister' not in context['title']:
-                    context['title'] = context['title'] + ' with sister'
-            elif 'friend' in user_msg or 'friend' in bot_msg:
-                if 'title' not in context:
-                    context['title'] = 'event with friend'
-                elif 'friend' not in context['title']:
-                    context['title'] = context['title'] + ' with friend'
-            
-            # Look for dates
-            if 'tomorrow' in user_msg:
-                tomorrow = datetime.datetime.now() + timedelta(days=1)
-                context['date'] = tomorrow.date()
-            elif 'today' in user_msg:
-                context['date'] = datetime.datetime.now().date()
-            elif 'next week' in user_msg:
-                next_week = datetime.datetime.now() + timedelta(days=7)
-                context['date'] = next_week.date()
-            
-            # Look for times in the conversation
-            import re
-            time_patterns = [
-                r'(\d{1,2})\s*(am|pm)',
-                r'(\d{1,2}):(\d{2})\s*(am|pm)?',
-                r'at\s+(\d{1,2})\s*(am|pm)',
-                r'make\s+it\s+(\d{1,2})\s*(am|pm)',
-                r'change\s+it\s+to\s+(\d{1,2})\s*(am|pm)'
-            ]
-            
-            for pattern in time_patterns:
-                matches = re.findall(pattern, user_msg + ' ' + bot_msg, re.IGNORECASE)
-                if matches:
-                    # Take the most recent time mentioned
-                    match = matches[-1]
-                    if len(match) == 2:  # hour and am/pm
-                        hour = int(match[0])
-                        period = match[1].lower()
-                        if period == 'pm' and hour != 12:
-                            hour += 12
-                        elif period == 'am' and hour == 12:
-                            hour = 0
-                        context['time'] = f"{hour:02d}:00"
-                    elif len(match) == 3:  # hour, minute, am/pm
-                        hour = int(match[0])
-                        minute = int(match[1]) if match[1] else 0
-                        period = match[2].lower() if match[2] else None
-                        if period == 'pm' and hour != 12:
-                            hour += 12
-                        elif period == 'am' and hour == 12:
-                            hour = 0
-                        context['time'] = f"{hour:02d}:{minute:02d}"
+            # Look for actual event creation requests, not phantom references
+            if any(keyword in user_msg for keyword in ['schedule', 'add', 'create', 'book', 'plan']):
+                # Only extract context if there's a clear intent to create something
+                
+                # Look for event titles in recent messages
+                if 'coffee' in user_msg:
+                    context['title'] = 'coffee date'
+                elif 'gym' in user_msg or 'workout' in user_msg:
+                    context['title'] = 'gym session'
+                elif 'meeting' in user_msg:
+                    context['title'] = 'meeting'
+                elif 'lunch' in user_msg:
+                    context['title'] = 'lunch'
+                elif 'dinner' in user_msg:
+                    context['title'] = 'dinner'
+                elif 'work' in user_msg or 'office' in user_msg or 'job' in user_msg:
+                    context['title'] = 'work'
+                
+                # Look for people/relationships
+                if 'sister' in user_msg:
+                    if 'title' in context:
+                        context['title'] = context['title'] + ' with sister'
+                    else:
+                        context['title'] = 'event with sister'
+                elif 'friend' in user_msg:
+                    if 'title' in context:
+                        context['title'] = context['title'] + ' with friend'
+                    else:
+                        context['title'] = 'event with friend'
+                
+                # Look for dates - be more specific
+                if 'tomorrow' in user_msg:
+                    tomorrow = datetime.datetime.now() + timedelta(days=1)
+                    context['date'] = tomorrow.date()
+                elif 'today' in user_msg:
+                    context['date'] = datetime.datetime.now().date()
+                elif 'next week' in user_msg:
+                    next_week = datetime.datetime.now() + timedelta(days=7)
+                    context['date'] = next_week.date()
+                
+                # Look for times in the conversation - improved parsing
+                import re
+                time_patterns = [
+                    r'(\d{1,2})\s*(am|pm)',
+                    r'(\d{1,2}):(\d{2})\s*(am|pm)?',
+                    r'at\s+(\d{1,2})\s*(am|pm)',
+                    r'(\d{1,2})(?:\s*(?:o\'clock|oclock))',
+                    # Turkish time patterns
+                    r'(\d{1,2})(?:\s*(?:da|de))',  # "9da" = "at 9"
+                ]
+                
+                for pattern in time_patterns:
+                    matches = re.findall(pattern, user_msg, re.IGNORECASE)
+                    if matches:
+                        # Take the most recent time mentioned
+                        match = matches[-1]
+                        if len(match) >= 1:
+                            hour = int(match[0])
+                            if len(match) > 1 and match[1]:
+                                if match[1].lower() in ['pm'] and hour != 12:
+                                    hour += 12
+                                elif match[1].lower() in ['am'] and hour == 12:
+                                    hour = 0
+                            context['time'] = f"{hour:02d}:00"
+                        break
         
         return context
 
     async def handle_contextual_followup(self, user_message: str) -> Tuple[str, Dict]:
-        """Handle follow-up messages that might be event-related but lack explicit intent"""
+        """Handle follow-up messages - FIXED VERSION"""
         user_msg_lower = user_message.lower().strip()
+        
+        # Don't create phantom events - only respond to explicit requests
+        explicit_create_patterns = [
+            'create', 'add', 'schedule', 'book', 'plan', 'set up', 'make an appointment'
+        ]
+        
+        # Check if this is an explicit creation request
+        has_explicit_intent = any(pattern in user_msg_lower for pattern in explicit_create_patterns)
+        
+        if not has_explicit_intent:
+            # This is not a contextual event creation, return None
+            return None, {}
         
         # Extract context from recent conversation
         context = self.extract_context_from_recent_messages()
         
-        # Check if this looks like a confirmation or modification request
-        confirmation_phrases = ['yes', 'correct', 'right', 'okay', 'ok', 'sure', 'please', 'go ahead']
-        modification_phrases = ['make it', 'change it to', 'update', 'modify', 'instead', 'just update']
-        time_phrases = ['am', 'pm', 'o\'clock', 'at']
-        action_phrases = ['create', 'add', 'schedule', 'book']
-        
-        is_confirmation = any(phrase in user_msg_lower for phrase in confirmation_phrases)
-        is_modification = any(phrase in user_msg_lower for phrase in modification_phrases)
-        has_time = any(phrase in user_msg_lower for phrase in time_phrases)
-        has_action = any(phrase in user_msg_lower for phrase in action_phrases)
+        # Only proceed if we have meaningful context
+        if not context or 'title' not in context:
+            return None, {}
         
         # Check if user is specifying a new time
         import re
-        time_match = re.search(r'(\d{1,2})\s*(am|pm|:\d{2})', user_msg_lower)
+        time_match = re.search(r'(\d{1,2})\s*(am|pm|:\d{2}|da|de)', user_msg_lower)
         
-        # Also check if the user is giving a direct instruction about the event
-        direct_instruction = any(phrase in user_msg_lower for phrase in ['just update', 'update the', 'create the', 'add the'])
+        if time_match:
+            hour_str = time_match.group(1)
+            period_or_suffix = time_match.group(2)
+            
+            hour = int(hour_str)
+            if period_or_suffix == 'pm' and hour != 12:
+                hour += 12
+            elif period_or_suffix == 'am' and hour == 12:
+                hour = 0
+            
+            context['time'] = f"{hour:02d}:00"
         
-        if (is_confirmation or is_modification or has_time or time_match or direct_instruction) and context:
-            print(f"Detected contextual follow-up. Context: {context}")
+        # Build event details from context only if we have sufficient info
+        if 'title' in context and 'date' in context:
+            base_date = context['date']
+            time_str = context.get('time', '10:00')  # default time
             
-            # Extract new time if mentioned
-            if time_match:
-                hour_str = time_match.group(1)
-                period_or_min = time_match.group(2)
-                
-                if ':' in period_or_min:
-                    # Format like "12:30"
-                    minute_str = period_or_min[1:]
-                    hour = int(hour_str)
-                    minute = int(minute_str)
-                    # Look for am/pm after the time
-                    period_match = re.search(r'(am|pm)', user_msg_lower[time_match.end():])
-                    if period_match:
-                        period = period_match.group(1)
-                        if period == 'pm' and hour != 12:
-                            hour += 12
-                        elif period == 'am' and hour == 12:
-                            hour = 0
-                else:
-                    # Format like "12 pm"
-                    hour = int(hour_str)
-                    period = period_or_min
-                    if period == 'pm' and hour != 12:
-                        hour += 12
-                    elif period == 'am' and hour == 12:
-                        hour = 0
-                    minute = 0
-                
-                context['time'] = f"{hour:02d}:{minute:02d}"
+            # Parse time
+            hour, minute = map(int, time_str.split(':'))
+            start_datetime = datetime.datetime.combine(base_date, datetime.time(hour, minute))
+            end_datetime = start_datetime + timedelta(hours=1)  # default 1 hour duration
             
-            # Build event details from context
-            if 'title' in context and 'date' in context:
-                base_date = context['date']
-                time_str = context.get('time', '10:00')  # default time
-                
-                # Parse time
-                hour, minute = map(int, time_str.split(':'))
-                start_datetime = datetime.datetime.combine(base_date, datetime.time(hour, minute))
-                end_datetime = start_datetime + timedelta(hours=1)  # default 1 hour duration
-                
-                event_details = {
-                    'title': context['title'],
-                    'start_time': start_datetime,
-                    'end_time': end_datetime,
-                    'description': f"Event created through conversation context",
-                    'importance': 5
-                }
-                
-                return "contextual_create", event_details
+            event_details = {
+                'title': context['title'],
+                'start_time': start_datetime,
+                'end_time': end_datetime,
+                'description': '',  # Empty description instead of context message
+                'importance': 5
+            }
+            
+            return "contextual_create", event_details
         
         return None, {}
 
     def handle_query_events(self, intent_data: Dict) -> Tuple[str, Dict]:
-        """
-        Improved handler for QUERY_EVENT and CHECK_AVAILABILITY intents
-        
-        Args:
-            intent_data: The intent classification data
-            
-        Returns:
-            Tuple of (event_action, event_data)
-        """
+        """Improved handler for QUERY_EVENT and CHECK_AVAILABILITY intents"""
         # Get event_details from intent_data, using an empty dict as default if not present
         event_details = intent_data.get("event_details", {})
         
@@ -320,19 +293,6 @@ class ConversationManager:
                 
                 print(f"May 10th query detected. Using date range: {start_time} to {end_time}")
             
-            # If the time range is less than 24 hours and both times are at hour boundaries,
-            # this is likely intended to be a full day query
-            elif (end_time - start_time < datetime.timedelta(days=1) and 
-                start_time.hour == 0 and start_time.minute == 0 and
-                (end_time.hour == 0 or end_time.hour == 1) and end_time.minute == 0):
-                
-                # Adjust to full day
-                day_date = start_time.date()
-                start_time = datetime.datetime.combine(day_date, datetime.time.min)
-                end_time = datetime.datetime.combine(day_date, datetime.time.max)
-                
-                print(f"Adjusted to full day query: {start_time} to {end_time}")
-            
             # Get events in the specified range
             events = self.db.get_events_in_range(start_time, end_time)
             
@@ -360,15 +320,7 @@ class ConversationManager:
             }
 
     async def create_recurring_events(self, event_details: Dict) -> Tuple[str, Dict]:
-        """
-        Handle creating recurring events
-        
-        Args:
-            event_details: Dictionary containing event details with recurrence info
-            
-        Returns:
-            Tuple of (event_action, event_data)
-        """
+        """Handle creating recurring events"""
         try:
             # Generate individual events from the recurring pattern
             individual_events = generate_recurring_events(event_details)
@@ -431,23 +383,115 @@ class ConversationManager:
         except Exception as e:
             print(f"Error creating recurring events: {e}")
             return "error", {"message": str(e)}
+
+    async def handle_bulk_deletion(self, user_message: str) -> Tuple[str, Dict]:
+        """Handle bulk deletion requests like 'delete all events tomorrow'"""
+        user_msg_lower = user_message.lower().strip()
+        
+        # Check for bulk deletion patterns
+        bulk_delete_patterns = [
+            'delete all', 'remove all', 'cancel all', 'clear all',
+            'sil hepsini', 'tümünü sil', 'hepsini sil', 'yarınki tüm', 'tüm etkinlik'
+        ]
+        
+        is_bulk_delete = any(pattern in user_msg_lower for pattern in bulk_delete_patterns)
+        
+        if not is_bulk_delete:
+            return None, {}
+        
+        # Determine the time range for deletion
+        target_date = None
+        if any(word in user_msg_lower for word in ['tomorrow', 'yarın']):
+            target_date = datetime.datetime.now().date() + timedelta(days=1)
+        elif any(word in user_msg_lower for word in ['today', 'bugün']):
+            target_date = datetime.datetime.now().date()
+        
+        if target_date:
+            # Get events for the target date
+            start_time = datetime.datetime.combine(target_date, datetime.time.min)
+            end_time = datetime.datetime.combine(target_date, datetime.time.max)
+            
+            events_to_delete = self.db.get_events_in_range(start_time, end_time)
+            
+            if not events_to_delete:
+                return "no_events_found", {"message": f"No events found for {target_date.strftime('%Y-%m-%d')}"}
+            
+            # Delete all events
+            deleted_count = 0
+            deleted_events = []
+            
+            for event in events_to_delete:
+                try:
+                    success = self.db.delete_event(event['id'])
+                    if success:
+                        deleted_count += 1
+                        deleted_events.append(event)
+                        print(f"Successfully deleted event: {event['title']} (ID: {event['id']})")
+                    else:
+                        print(f"Failed to delete event: {event['title']} (ID: {event['id']})")
+                except Exception as e:
+                    print(f"Error deleting event {event['id']}: {e}")
+            
+            if deleted_count > 0:
+                return "bulk_deleted", {
+                    "deleted_count": deleted_count,
+                    "deleted_events": deleted_events,
+                    "target_date": target_date.strftime('%Y-%m-%d')
+                }
+            else:
+                return "deletion_failed", {"message": "Failed to delete events"}
+        
+        return None, {}
         
     async def process_message(self, user_message: str) -> Dict:
-        """
-        Process a user message and generate an appropriate response
-        
-        Args:
-            user_message: The user's message
-        
-        Returns:
-            Dictionary with bot response and any actions to take
-        """
+        """Process a user message and generate an appropriate response - IMPROVED VERSION"""
         try:
             # Ensure conversation history is loaded
             if not self.conversation_history:
                 self.load_conversation_history()
             
-            # First, check if this might be a contextual follow-up
+            # First, check for bulk deletion requests
+            bulk_action, bulk_data = await self.handle_bulk_deletion(user_message)
+            
+            if bulk_action:
+                print(f"Processing bulk deletion: {bulk_action}")
+                
+                if bulk_action == "bulk_deleted":
+                    # Generate success response
+                    response_text = f"Successfully deleted {bulk_data['deleted_count']} events for {bulk_data['target_date']}."
+                    
+                    # Store conversation
+                    conversation_id = self.db.store_conversation(user_message, response_text, related_event_id=None)
+                    
+                    # Add to in-memory conversation history
+                    self.conversation_history.append({
+                        "user_message": user_message,
+                        "bot_response": response_text,
+                        "intent": "BULK_DELETE",
+                        "timestamp": datetime.datetime.now(),
+                        "related_event_id": None,
+                        "id": conversation_id
+                    })
+                    
+                    return {
+                        "text": response_text,
+                        "ui_action": {
+                            "type": "refresh_calendar",
+                            "message": f"Deleted {bulk_data['deleted_count']} events"
+                        }
+                    }
+                elif bulk_action == "no_events_found":
+                    response_text = bulk_data["message"]
+                    
+                    # Store conversation
+                    conversation_id = self.db.store_conversation(user_message, response_text, related_event_id=None)
+                    
+                    return {"text": response_text, "ui_action": None}
+                else:
+                    response_text = "There was an issue with deleting the events. Please try again."
+                    return {"text": response_text, "ui_action": None}
+            
+            # Check if this might be a contextual follow-up (but be more strict)
             contextual_action, contextual_data = await self.handle_contextual_followup(user_message)
             
             if contextual_action == "contextual_create":
@@ -487,9 +531,7 @@ class ConversationManager:
                             f"Event '{contextual_data['title']}' scheduled for "
                             f"{contextual_data['start_time'].strftime('%Y-%m-%d %H:%M')} to "
                             f"{contextual_data['end_time'].strftime('%Y-%m-%d %H:%M')}. "
-                            f"Created through contextual conversation. "
-                            f"Importance: {contextual_data.get('importance', 5)}. "
-                            f"Description: {contextual_data.get('description', 'No description')}"
+                            f"Importance: {contextual_data.get('importance', 5)}."
                         )
                         embedding = await self.get_embedding(memory_content)
                         self.db.store_memory(event_id, memory_content, embedding)
@@ -558,56 +600,61 @@ class ConversationManager:
                         event_details = intent_data.get("event_details", {})
                         print(f"Extracted event details: {event_details}")
                         
-                        # Ensure we have both start_time and end_time
-                        if "start_time" in event_details and isinstance(event_details["start_time"], datetime.datetime):
-                            # If end_time is missing, set it to 1 hour after start_time
-                            if "end_time" not in event_details or not isinstance(event_details["end_time"], datetime.datetime):
-                                event_details["end_time"] = event_details["start_time"] + timedelta(hours=1)
-                            
-                            # Classify importance if not already set
-                            if "importance" not in event_details:
-                                event_details["importance"] = await self.importance_classifier.classify_importance(
-                                    event_details, 
-                                    user_message
-                                )
-                            
-                            # Check for conflicts BEFORE creating the event
-                            conflicting_events = self.db.check_conflicting_events(
-                                event_details["start_time"], 
-                                event_details["end_time"]
-                            )
-                            
-                            if conflicting_events:
-                                print(f"Found {len(conflicting_events)} conflicting events")
-                                conflict_info = conflicting_events
-                                event_action = "conflict"
-                                event_data = event_details
-                            else:
-                                # No conflicts, create the event
-                                try:
-                                    event_id = self.db.add_event(event_details)
-                                    print(f"Successfully created event with ID: {event_id}")
-                                    event_details["id"] = event_id
-                                    event_action = "created"
-                                    event_data = event_details
-                                    related_event_id = event_id
-                                    
-                                    # Store memory for the event
-                                    memory_content = (
-                                        f"Event '{event_details['title']}' scheduled for "
-                                        f"{event_details['start_time'].strftime('%Y-%m-%d %H:%M')} to "
-                                        f"{event_details['end_time'].strftime('%Y-%m-%d %H:%M')}. "
-                                        f"Importance: {event_details.get('importance', 5)}. "
-                                        f"Description: {event_details.get('description', 'No description')}"
-                                    )
-                                    embedding = await self.get_embedding(memory_content)
-                                    self.db.store_memory(event_id, memory_content, embedding)
-                                except Exception as e:
-                                    print(f"Error creating event: {e}")
-                                    event_action = "error"
-                        else:
-                            print("Missing or invalid start_time for event creation")
+                        # Don't create events without explicit user intent
+                        if not event_details.get("title") or not event_details.get("start_time"):
+                            print("Insufficient event details, skipping creation")
                             event_action = "needs_clarification"
+                        else:
+                            # Ensure we have both start_time and end_time
+                            if isinstance(event_details["start_time"], datetime.datetime):
+                                # If end_time is missing, set it to 1 hour after start_time
+                                if "end_time" not in event_details or not isinstance(event_details["end_time"], datetime.datetime):
+                                    event_details["end_time"] = event_details["start_time"] + timedelta(hours=1)
+                                
+                                # Classify importance if not already set
+                                if "importance" not in event_details:
+                                    event_details["importance"] = await self.importance_classifier.classify_importance(
+                                        event_details, 
+                                        user_message
+                                    )
+                                
+                                # Check for conflicts BEFORE creating the event
+                                conflicting_events = self.db.check_conflicting_events(
+                                    event_details["start_time"], 
+                                    event_details["end_time"]
+                                )
+                                
+                                if conflicting_events:
+                                    print(f"Found {len(conflicting_events)} conflicting events")
+                                    conflict_info = conflicting_events
+                                    event_action = "conflict"
+                                    event_data = event_details
+                                else:
+                                    # No conflicts, create the event
+                                    try:
+                                        event_id = self.db.add_event(event_details)
+                                        print(f"Successfully created event with ID: {event_id}")
+                                        event_details["id"] = event_id
+                                        event_action = "created"
+                                        event_data = event_details
+                                        related_event_id = event_id
+                                        
+                                        # Store memory for the event
+                                        memory_content = (
+                                            f"Event '{event_details['title']}' scheduled for "
+                                            f"{event_details['start_time'].strftime('%Y-%m-%d %H:%M')} to "
+                                            f"{event_details['end_time'].strftime('%Y-%m-%d %H:%M')}. "
+                                            f"Importance: {event_details.get('importance', 5)}. "
+                                            f"Description: {event_details.get('description', 'No description')}"
+                                        )
+                                        embedding = await self.get_embedding(memory_content)
+                                        self.db.store_memory(event_id, memory_content, embedding)
+                                    except Exception as e:
+                                        print(f"Error creating event: {e}")
+                                        event_action = "error"
+                            else:
+                                print("Missing or invalid start_time for event creation")
+                                event_action = "needs_clarification"
                 
                 elif intent_data["intent"] == "UPDATE_EVENT":
                     # Handle event updates
@@ -663,7 +710,7 @@ class ConversationManager:
                         event_action = "needs_clarification"
                     
                 elif intent_data["intent"] == "DELETE_EVENT":
-                    # Handle event deletion
+                    # Handle event deletion - IMPROVED VERSION
                     print("Processing DELETE_EVENT intent")
                     event_details = intent_data.get("event_details", {})
                     event_id = event_details.get("event_id")
@@ -686,17 +733,26 @@ class ConversationManager:
                         else:
                             event_action = "not_found"
                     else:
-                        print("No event_id provided for deletion - need to search by title/description")
+                        print("No event_id provided for deletion - searching by title/description")
                         # If no specific ID, try to find the event by title or description
-                        if "title" in event_details:
-                            # Search for events by title (this is a simplified approach)
-                            # You might want to implement a more sophisticated search
-                            all_events = self.db.get_events_in_range(
-                                datetime.datetime.now() - timedelta(days=30),
-                                datetime.datetime.now() + timedelta(days=365)
-                            )
+                        if "title" in event_details and event_details["title"]:
+                            # Get events from today and the future for searching
+                            search_start = datetime.datetime.now() - timedelta(days=1)
+                            search_end = datetime.datetime.now() + timedelta(days=365)
                             
-                            matching_events = [e for e in all_events if event_details["title"].lower() in e["title"].lower()]
+                            all_events = self.db.get_events_in_range(search_start, search_end)
+                            
+                            # Search for events containing the title keywords
+                            search_title = event_details["title"].lower()
+                            matching_events = []
+                            
+                            # Look for exact matches first, then partial matches
+                            for event in all_events:
+                                event_title_lower = event["title"].lower()
+                                if search_title in event_title_lower or event_title_lower in search_title:
+                                    matching_events.append(event)
+                            
+                            print(f"Found {len(matching_events)} matching events for title: {search_title}")
                             
                             if len(matching_events) == 1:
                                 # Found exactly one match, delete it
@@ -704,18 +760,23 @@ class ConversationManager:
                                 related_event_id = event_to_delete["id"]
                                 success = self.db.delete_event(event_to_delete["id"])
                                 if success:
+                                    print(f"Successfully deleted event: {event_to_delete['title']} (ID: {event_to_delete['id']})")
                                     event_action = "deleted"
                                     event_data = event_to_delete
                                 else:
+                                    print(f"Failed to delete event: {event_to_delete['title']} (ID: {event_to_delete['id']})")
                                     event_action = "error"
                             elif len(matching_events) > 1:
                                 # Multiple matches, need clarification
+                                print(f"Multiple matches found: {[e['title'] for e in matching_events]}")
                                 event_action = "multiple_matches"
                                 event_data = {"matches": matching_events}
                             else:
                                 # No matches found
+                                print(f"No events found matching: {search_title}")
                                 event_action = "not_found"
                         else:
+                            print("No event_id or title provided for deletion")
                             event_action = "needs_clarification"
                     
                 elif intent_data["intent"] == "QUERY_EVENT" or intent_data["intent"] == "CHECK_AVAILABILITY":
@@ -764,6 +825,9 @@ class ConversationManager:
             
             Your primary role is to help users manage their calendar events.
             
+            IMPORTANT: Do NOT create phantom events or reference events that don't exist.
+            Only work with events that are explicitly requested by the user or that actually exist in the database.
+            
             When responding to the user:
             1. Be concise and helpful
             2. If you've taken an action (created/updated/deleted an event), confirm it clearly
@@ -773,6 +837,8 @@ class ConversationManager:
             6. Remember the conversation history and refer to it when appropriate
             7. For recurring events, mention how many events were created
             8. When you create an event from context (like follow-up messages), be clear about what you created
+            9. NEVER mention events that were not actually created or that don't exist
+            10. If asked to delete events, confirm the actual deletion and provide details
             
             Current date: {current_date}
             Current time: {current_time}
@@ -836,6 +902,7 @@ class ConversationManager:
                 formatted_prompt += f"\n\nSUCCESSFULLY DELETED event:\n"
                 formatted_prompt += f"- Title: '{event_data['title']}'\n"
                 formatted_prompt += f"- Time: {event_data['start_time'].strftime('%Y-%m-%d %H:%M')} to {event_data['end_time'].strftime('%Y-%m-%d %H:%M')}\n"
+                formatted_prompt += f"- Event was permanently removed from the calendar\n"
                 
             elif event_action == "updated" or event_action == "rescheduled":
                 formatted_prompt += f"\n\nSUCCESSFULLY {event_action.upper()} event:\n"
@@ -962,16 +1029,7 @@ class ConversationManager:
             }
     
     async def retrieve_relevant_memories(self, user_message: str, intent_data: Dict) -> List[Dict]:
-        """
-        Retrieve relevant memories from the database
-        
-        Args:
-            user_message: The user's message
-            intent_data: Intent classification data
-            
-        Returns:
-            List of relevant memory entries
-        """
+        """Retrieve relevant memories from the database"""
         try:
             # For simplicity, just get the most recent memories
             # This avoids vector similarity search issues

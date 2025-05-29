@@ -29,16 +29,7 @@ class IntentClassifier:
         ]
     
     async def classify_intent(self, user_message: str, conversation_history: List[Dict] = None) -> Dict:
-        """
-        Classify the user's intent using Gemini
-        
-        Args:
-            user_message: The user's message to analyze
-            conversation_history: Optional list of previous conversation turns
-        
-        Returns:
-            Dictionary containing intent classification and extracted event details
-        """
+        """Classify the user's intent using Gemini - IMPROVED VERSION"""
         # Create system prompt for Gemini
         system_prompt = f"""
         You are an AI assistant that analyzes user messages to determine intent related to calendar events.
@@ -46,7 +37,13 @@ class IntentClassifier:
         
         Available intents are: {', '.join(self.intent_types)}
         
-        IMPORTANT: Pay special attention to follow-up messages and conversational context.
+        IMPORTANT: Pay special attention to deletion requests and follow-up messages.
+        
+        DELETION PATTERNS to recognize:
+        - "delete", "remove", "cancel"
+        - "delete all", "remove all"
+        - "delete event", "cancel meeting", "remove appointment"
+        - "delete tomorrow's events"
         
         For calendar-related intents, extract these details when present:
         - title: The name/title of the event
@@ -63,6 +60,14 @@ class IntentClassifier:
         - recurrence_count: Number of occurrences (e.g., "7 days", "2 weeks")
         - recurrence_end_date: When the recurring events should stop
         - recurrence_days: For weekly events, which days (e.g., ["monday", "wednesday", "friday"])
+        
+        For DELETE_EVENT intent, be especially careful to extract:
+        - event_id: If mentioned explicitly (like "delete event 5" or "cancel meeting 3")
+        - title: If they mention deleting by name (like "delete the basketball game" or "cancel my dentist appointment")
+        - time_reference: If they mention time (like "delete the 9 o'clock one", "delete tomorrow's events")
+        - bulk_deletion: Boolean indicating if they want to delete multiple events
+        
+
         
         For CONFIRM_ACTION intent, detect:
         - Confirmation phrases: "yes", "correct", "right", "okay", "sure", "go ahead", "please"
@@ -81,11 +86,6 @@ class IntentClassifier:
         - "meeting every Monday for 4 weeks"
         - "workout every weekday"
         
-        For DELETE_EVENT intent, be especially careful to extract:
-        - event_id: If mentioned explicitly (like "delete event 5" or "cancel meeting 3")
-        - title: If they mention deleting by name (like "delete the basketball game" or "cancel my dentist appointment")
-        - Any other identifying information that could help find the event
-        
         Return your analysis as a JSON object with these fields:
         - intent: One of the predefined intent types
         - confidence: How confident you are in this classification (0.0-1.0)
@@ -96,6 +96,12 @@ class IntentClassifier:
         
         Current date: {datetime.datetime.now().strftime('%Y-%m-%d')}
         Current time: {datetime.datetime.now().strftime('%H:%M')}
+        
+        Examples of DELETE_EVENT patterns:
+        - "delete the basketball game"
+        - "cancel my meeting with John"
+        - "remove the event on Friday"
+        - "delete event 5"
         
         Examples of CONFIRM_ACTION patterns:
         - "yes" (when following event creation discussion)
@@ -109,12 +115,6 @@ class IntentClassifier:
         - "Add workout session daily at 6pm for 7 days" -> CREATE_RECURRING_EVENT
         - "Meeting every Monday at 2pm for 4 weeks" -> CREATE_RECURRING_EVENT
         - "Book dentist appointment tomorrow at 3pm" -> CREATE_EVENT
-        
-        Examples of DELETE_EVENT messages:
-        - "delete the basketball game"
-        - "cancel my meeting with John"
-        - "remove the event on Friday"
-        - "delete event 5"
         """
         
         # Create the conversation history context
@@ -151,16 +151,9 @@ class IntentClassifier:
             try:
                 result = json.loads(json_str)
             except json.JSONDecodeError:
-                # If JSON parsing fails, create a default response
+                # If JSON parsing fails, try fallback classification
                 print(f"Failed to parse JSON from response: {response_text}")
-                return {
-                    "intent": "GENERAL_CONVERSATION",
-                    "confidence": 0.5,
-                    "event_details": {},
-                    "needs_clarification": True,
-                    "clarification_question": "I'm not sure what you'd like me to do. Could you clarify?",
-                    "context_dependent": False
-                }
+                return self._fallback_classification(user_message, conversation_history)
             
             # Validate intent type
             if result.get('intent') not in self.intent_types:
@@ -229,7 +222,33 @@ class IntentClassifier:
         
         except Exception as e:
             print(f"Error in intent classification: {e}")
-            # Return a default response in case of error
+            # Return a fallback classification
+            return self._fallback_classification(user_message, conversation_history)
+    
+    def _fallback_classification(self, user_message: str, conversation_history: List[Dict] = None) -> Dict:
+        """Fallback classification when AI fails"""
+        user_msg_lower = user_message.lower().strip()
+        
+        # Simple rule-based fallback
+        if any(word in user_msg_lower for word in ['delete', 'remove', 'cancel']):
+            return {
+                "intent": "DELETE_EVENT",
+                "confidence": 0.7,
+                "event_details": {"title": user_message},
+                "needs_clarification": True,
+                "clarification_question": "Which event would you like to delete?",
+                "context_dependent": False
+            }
+        elif any(word in user_msg_lower for word in ['create', 'add', 'schedule', 'book', 'plan']):
+            return {
+                "intent": "CREATE_EVENT",
+                "confidence": 0.7,
+                "event_details": {},
+                "needs_clarification": True,
+                "clarification_question": "What event would you like to create?",
+                "context_dependent": False
+            }
+        else:
             return {
                 "intent": "GENERAL_CONVERSATION",
                 "confidence": 0.5,
@@ -240,12 +259,7 @@ class IntentClassifier:
             }
     
     def _parse_datetime(self, datetime_str: str) -> datetime.datetime:
-        """
-        Parse a natural language datetime string to a datetime object
-        
-        This is a simplified version - in a production system, you might use a more
-        robust solution like dateparser or write more comprehensive parsing logic
-        """
+        """Parse a natural language datetime string to a datetime object - IMPROVED VERSION"""
         now = datetime.datetime.now()
         today = now.replace(hour=0, minute=0, second=0, microsecond=0)
         
@@ -295,11 +309,11 @@ class IntentClassifier:
                 pass
         
         # Parse relative dates
-        if "today" in datetime_str:
+        if any(word in datetime_str for word in ["today"]):
             base_date = today
-        elif "tomorrow" in datetime_str:
+        elif any(word in datetime_str for word in ["tomorrow"]):
             base_date = today + datetime.timedelta(days=1)
-        elif "yesterday" in datetime_str:
+        elif any(word in datetime_str for word in ["yesterday"]):
             base_date = today - datetime.timedelta(days=1)
         elif "monday" in datetime_str:
             days_ahead = 0 - today.weekday()
@@ -352,31 +366,39 @@ class IntentClassifier:
                 # If nothing worked, return current time
                 return now
         
-        # Try to extract time
-        time_match = re.search(r'(\d{1,2}):(\d{2})\s*(am|pm)?', datetime_str, re.IGNORECASE)
-        if time_match:
-            hour = int(time_match.group(1))
-            minute = int(time_match.group(2))
-            am_pm = time_match.group(3)
+        # Try to extract time - improved patterns
+        time_patterns = [
+            r'(\d{1,2}):(\d{2})\s*(am|pm)?',  # 12:30 pm
+            r'(\d{1,2})\s*(am|pm)',           # 12 pm
+            r'(\d{1,2})\s*(?:o\'clock|oclock)', # 12 o'clock
+            r'(\d{1,2})(?:da|de)',            # Turkish: 9da (at 9)
+        ]
+        
+        for pattern in time_patterns:
+            time_match = re.search(pattern, datetime_str, re.IGNORECASE)
+            if time_match:
+                hour = int(time_match.group(1))
+                minute = int(time_match.group(2)) if len(time_match.groups()) > 1 and time_match.group(2) else 0
+                am_pm = time_match.group(3) if len(time_match.groups()) > 2 else None
+                
+                # Handle AM/PM
+                if am_pm and am_pm.lower() == 'pm' and hour < 12:
+                    hour += 12
+                elif am_pm and am_pm.lower() == 'am' and hour == 12:
+                    hour = 0
+                    
+                return base_date.replace(hour=hour, minute=minute)
+        
+        # Check for relative times like "in 2 hours", "in 30 minutes"
+        hours_match = re.search(r'in\s+(\d+)\s+hours?', datetime_str)
+        if hours_match:
+            hours = int(hours_match.group(1))
+            return now + datetime.timedelta(hours=hours)
             
-            # Handle AM/PM
-            if am_pm and am_pm.lower() == 'pm' and hour < 12:
-                hour += 12
-            elif am_pm and am_pm.lower() == 'am' and hour == 12:
-                hour = 0
-                
-            return base_date.replace(hour=hour, minute=minute)
-        else:
-            # Check for relative times like "in 2 hours", "in 30 minutes"
-            hours_match = re.search(r'in\s+(\d+)\s+hours?', datetime_str)
-            if hours_match:
-                hours = int(hours_match.group(1))
-                return now + datetime.timedelta(hours=hours)
-                
-            mins_match = re.search(r'in\s+(\d+)\s+minutes?', datetime_str)
-            if mins_match:
-                minutes = int(mins_match.group(1))
-                return now + datetime.timedelta(minutes=minutes)
+        mins_match = re.search(r'in\s+(\d+)\s+minutes?', datetime_str)
+        if mins_match:
+            minutes = int(mins_match.group(1))
+            return now + datetime.timedelta(minutes=minutes)
         
         # Default to 9am if no time specified
         return base_date.replace(hour=9, minute=0)

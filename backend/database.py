@@ -229,9 +229,12 @@ class Database:
             raise
     
     def delete_event(self, event_id: int) -> bool:
-        """Delete an event from the calendar"""
+        """Delete an event from the calendar - IMPROVED VERSION"""
         try:
             print(f"Attempting to delete event with ID: {event_id}")
+            
+            # Start a transaction
+            self.cursor.execute("BEGIN;")
             
             # First, check if the event exists
             check_query = "SELECT id, title FROM events WHERE id = %s;"
@@ -240,20 +243,33 @@ class Database:
             
             if not existing_event:
                 print(f"Event with ID {event_id} does not exist")
+                self.cursor.execute("ROLLBACK;")
                 return False
             
             print(f"Found event to delete: {existing_event['title']} (ID: {existing_event['id']})")
             
-            # Delete the event
-            query = "DELETE FROM events WHERE id = %s;"
-            self.cursor.execute(query, (event_id,))
+            # Delete related records first to maintain referential integrity
+            # Delete conversation history references
+            self.cursor.execute("UPDATE conversation_history SET related_event_id = NULL WHERE related_event_id = %s;", (event_id,))
+            print(f"Cleared conversation history references for event {event_id}")
+            
+            # Delete memory entries
+            self.cursor.execute("DELETE FROM memory WHERE event_id = %s;", (event_id,))
+            deleted_memories = self.cursor.rowcount
+            print(f"Deleted {deleted_memories} memory entries for event {event_id}")
+            
+            # Finally, delete the event itself
+            delete_query = "DELETE FROM events WHERE id = %s;"
+            self.cursor.execute(delete_query, (event_id,))
             deleted_count = self.cursor.rowcount
-            self.conn.commit()
+            
+            # Commit the transaction
+            self.cursor.execute("COMMIT;")
             
             print(f"Delete query executed. Rows affected: {deleted_count}")
             
             if deleted_count > 0:
-                print(f"Successfully deleted event {event_id}")
+                print(f"Successfully deleted event {event_id} and all related data")
                 return True
             else:
                 print(f"No event was deleted for ID {event_id}")
@@ -263,6 +279,10 @@ class Database:
             print(f"Error deleting event: {e}")
             import traceback
             traceback.print_exc()
+            try:
+                self.cursor.execute("ROLLBACK;")
+            except:
+                pass  # Rollback might fail if connection is broken
             self.conn.rollback()
             raise
     
@@ -270,7 +290,7 @@ class Database:
         """Get a specific event by ID"""
         try:
             print(f"Fetching event with ID: {event_id}")
-            query = "SELECT * FROM events WHERE id = %s;"
+            query = "SELECT * FROM events WHERE id = %s AND status = 'active';"
             self.cursor.execute(query, (event_id,))
             event = self.cursor.fetchone()
             
@@ -278,7 +298,7 @@ class Database:
                 print(f"Found event: {event['title']} (ID: {event['id']})")
                 return dict(event)
             else:
-                print(f"No event found with ID: {event_id}")
+                print(f"No active event found with ID: {event_id}")
                 return None
         except Exception as e:
             print(f"Error getting event: {e}")
@@ -292,15 +312,17 @@ class Database:
             query = """
                 SELECT * FROM events 
                 WHERE 
-                    (start_time BETWEEN %s AND %s) OR
-                    (end_time BETWEEN %s AND %s) OR
-                    (start_time <= %s AND end_time >= %s)
+                    status = 'active' AND (
+                        (start_time BETWEEN %s AND %s) OR
+                        (end_time BETWEEN %s AND %s) OR
+                        (start_time <= %s AND end_time >= %s)
+                    )
                 ORDER BY start_time ASC;
             """
             self.cursor.execute(query, (start_time, end_time, start_time, end_time, start_time, end_time))
             
             events = self.cursor.fetchall()
-            print(f"Found {len(events)} events")
+            print(f"Found {len(events)} active events")
             
             # Convert to list of dictionaries
             result = []
@@ -316,33 +338,35 @@ class Database:
             return []
     
     def check_conflicting_events(self, start_time: datetime, end_time: datetime, exclude_event_id: Optional[int] = None) -> List[Dict]:
-        """Check for conflicting events in the specified time range"""
+        """Check for conflicting events in the specified time range - FIXED VERSION"""
         try:
             print(f"Checking for conflicts between {start_time} and {end_time}")
             if exclude_event_id:
                 print(f"Excluding event ID: {exclude_event_id}")
                 
-            # Fixed conflict detection to properly handle adjacent events
-            # Events are considered conflicting if:
-            # 1. New event starts before existing event ends AND new event ends after existing event starts
-            # This excludes cases where one event ends exactly when another starts
+            # FIXED conflict detection logic:
+            # Events are considered conflicting if they overlap in time
+            # Two events overlap if: start1 < end2 AND start2 < end1
+            # This properly handles all overlap scenarios while excluding adjacent events
             
             if exclude_event_id is not None:
                 query = """
                     SELECT * FROM events 
                     WHERE 
-                        (start_time < %s AND end_time > %s)
-                        AND status = 'active'
+                        status = 'active'
                         AND id != %s
+                        AND start_time < %s 
+                        AND end_time > %s
                     ORDER BY importance DESC, start_time ASC;
                 """
-                params = [end_time, start_time, exclude_event_id]
+                params = [exclude_event_id, end_time, start_time]
             else:
                 query = """
                     SELECT * FROM events 
                     WHERE 
-                        (start_time < %s AND end_time > %s)
-                        AND status = 'active'
+                        status = 'active'
+                        AND start_time < %s 
+                        AND end_time > %s
                     ORDER BY importance DESC, start_time ASC;
                 """
                 params = [end_time, start_time]
@@ -352,11 +376,11 @@ class Database:
             
             print(f"Found {len(conflicts)} conflicting events")
             
-            # Convert to list of dictionaries
+            # Convert to list of dictionaries and log details
             result = []
             for conflict in conflicts:
                 conflict_dict = dict(conflict)
-                print(f"  - {conflict_dict['title']} at {conflict_dict['start_time']} to {conflict_dict['end_time']}")
+                print(f"  - Conflict: {conflict_dict['title']} at {conflict_dict['start_time']} to {conflict_dict['end_time']}")
                 result.append(conflict_dict)
                 
             return result
@@ -418,6 +442,13 @@ class Database:
     def store_conversation(self, user_message: str, bot_response: str, related_event_id: Optional[int] = None) -> int:
         """Store a conversation entry"""
         try:
+            # Verify the event exists if an ID is provided
+            if related_event_id is not None:
+                event = self.get_event(related_event_id)
+                if not event:
+                    print(f"Warning: Event ID {related_event_id} not found, storing conversation without event reference")
+                    related_event_id = None
+            
             query = """
                 INSERT INTO conversation_history
                 (user_message, bot_response, related_event_id)
@@ -446,6 +477,83 @@ class Database:
         except Exception as e:
             print(f"Error getting recent conversations: {e}")
             raise
+    
+    def get_all_events(self) -> List[Dict]:
+        """Get all active events - useful for debugging"""
+        try:
+            query = """
+                SELECT * FROM events 
+                WHERE status = 'active'
+                ORDER BY start_time ASC;
+            """
+            self.cursor.execute(query)
+            events = self.cursor.fetchall()
+            
+            result = []
+            for event in events:
+                event_dict = dict(event)
+                result.append(event_dict)
+                
+            return result
+        except Exception as e:
+            print(f"Error getting all events: {e}")
+            return []
+    
+    def cleanup_orphaned_records(self):
+        """Clean up orphaned records in related tables"""
+        try:
+            print("Cleaning up orphaned records...")
+            
+            # Clean up memory entries for non-existent events
+            self.cursor.execute("""
+                DELETE FROM memory 
+                WHERE event_id IS NOT NULL 
+                AND event_id NOT IN (SELECT id FROM events WHERE status = 'active');
+            """)
+            deleted_memories = self.cursor.rowcount
+            
+            # Clean up conversation history for non-existent events
+            self.cursor.execute("""
+                UPDATE conversation_history 
+                SET related_event_id = NULL 
+                WHERE related_event_id IS NOT NULL 
+                AND related_event_id NOT IN (SELECT id FROM events WHERE status = 'active');
+            """)
+            updated_conversations = self.cursor.rowcount
+            
+            self.conn.commit()
+            
+            print(f"Cleaned up {deleted_memories} orphaned memory entries")
+            print(f"Updated {updated_conversations} conversation references")
+            
+        except Exception as e:
+            print(f"Error cleaning up orphaned records: {e}")
+            self.conn.rollback()
+    
+    def get_database_stats(self) -> Dict:
+        """Get database statistics for debugging"""
+        try:
+            stats = {}
+            
+            # Count events
+            self.cursor.execute("SELECT COUNT(*) FROM events WHERE status = 'active';")
+            stats['active_events'] = self.cursor.fetchone()[0]
+            
+            self.cursor.execute("SELECT COUNT(*) FROM events WHERE status != 'active';")
+            stats['inactive_events'] = self.cursor.fetchone()[0]
+            
+            # Count memories
+            self.cursor.execute("SELECT COUNT(*) FROM memory;")
+            stats['memory_entries'] = self.cursor.fetchone()[0]
+            
+            # Count conversations
+            self.cursor.execute("SELECT COUNT(*) FROM conversation_history;")
+            stats['conversations'] = self.cursor.fetchone()[0]
+            
+            return stats
+        except Exception as e:
+            print(f"Error getting database stats: {e}")
+            return {}
     
     def close(self):
         """Close database connections"""
