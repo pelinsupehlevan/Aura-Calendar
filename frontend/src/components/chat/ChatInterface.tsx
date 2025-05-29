@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { ChatMessage, apiService, Event } from '@/services/api';
-import { ArrowUp, AlertCircle, Calendar, Trash2, Edit } from 'lucide-react';
+import { ArrowUp, AlertCircle, Calendar, Trash2, Edit, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import ApiError from '../ui/api-error';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -20,6 +20,12 @@ interface ConflictAction {
   proposed_event: Partial<Event>;
 }
 
+interface RefreshCalendarAction {
+  type: 'refresh_calendar';
+  event_count: number;
+  message: string;
+}
+
 const ChatInterface: React.FC = () => {
   // Initialize with default welcome message or stored history
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
@@ -28,7 +34,7 @@ const ChatInterface: React.FC = () => {
     return [
       {
         id: '1',
-        text: "Hey Hi Hello Yo Whatsup! I'm Aura, your smart calendar assistant. I can remember our previous conversations. How can I help you today?",
+        text: "Hi there! I'm Aura, your smart calendar assistant. How can I help you in this beautiful day?",
         role: 'assistant',
         timestamp: new Date(),
       },
@@ -171,6 +177,12 @@ const ChatInterface: React.FC = () => {
           case 'remove_event':
             toast.success('Event removed from calendar');
             break;
+          case 'refresh_calendar':
+            const refreshAction = response.ui_action as RefreshCalendarAction;
+            toast.success(refreshAction.message);
+            // Optionally trigger a calendar refresh here
+            // You could emit an event or call a callback to refresh the calendar view
+            break;
           case 'show_conflict':
             const conflictAction = response.ui_action as ConflictAction;
             setConflictDialog({
@@ -207,7 +219,7 @@ const ChatInterface: React.FC = () => {
     // Keep only the welcome message
     const welcomeMessage = {
       id: Date.now().toString(),
-      text: "Hi there! I'm Aura, your smart calendar assistant. How can I help you today?",
+      text: "Hi there! I'm Aura, your smart calendar assistant. How can I help you in this beautiful day?",
       role: 'assistant' as const,
       timestamp: new Date(),
     };
@@ -393,7 +405,7 @@ const ChatInterface: React.FC = () => {
         <form onSubmit={handleSubmit} className="flex items-end">
           <Textarea
             ref={inputRef}
-            placeholder="Type a message..."
+            placeholder="Type your message here..."
             value={inputMessage}
             onChange={(e) => setInputMessage(e.target.value)}
             onKeyDown={(e) => {

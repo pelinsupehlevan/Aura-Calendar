@@ -18,11 +18,13 @@ class IntentClassifier:
         # Define the intents we want to recognize
         self.intent_types = [
             "CREATE_EVENT",           # Create a new calendar event
+            "CREATE_RECURRING_EVENT", # Create recurring events
             "UPDATE_EVENT",           # Update an existing event
             "DELETE_EVENT",           # Delete/cancel an event
             "QUERY_EVENT",            # Ask about existing events
             "CHECK_AVAILABILITY",     # Check if a time slot is available
             "RESCHEDULE_EVENT",       # Move an event to a different time
+            "CONFIRM_ACTION",         # Confirm or agree to a proposed action
             "GENERAL_CONVERSATION",   # General conversation, not related to calendar
         ]
     
@@ -44,6 +46,8 @@ class IntentClassifier:
         
         Available intents are: {', '.join(self.intent_types)}
         
+        IMPORTANT: Pay special attention to follow-up messages and conversational context.
+        
         For calendar-related intents, extract these details when present:
         - title: The name/title of the event
         - description: Description of what the event is about
@@ -52,6 +56,30 @@ class IntentClassifier:
         - duration: The time that event consumes (default: 60 minutes)
         - location: Where the event takes place (if mentioned)
         - event_id: If the user is referring to a specific existing event (if mentioned)
+        - recurrence: Information about recurring events
+        
+        For CREATE_RECURRING_EVENT intent, also extract:
+        - recurrence_type: "daily", "weekly", "monthly", or "yearly"
+        - recurrence_count: Number of occurrences (e.g., "7 days", "2 weeks")
+        - recurrence_end_date: When the recurring events should stop
+        - recurrence_days: For weekly events, which days (e.g., ["monday", "wednesday", "friday"])
+        
+        For CONFIRM_ACTION intent, detect:
+        - Confirmation phrases: "yes", "correct", "right", "okay", "sure", "go ahead", "please"
+        - Time modifications: "make it 12 pm", "change it to 2pm", "at 3 o'clock"
+        - Agreement with suggested changes
+        
+        CONTEXT AWARENESS:
+        - If the conversation history shows recent event planning discussions, and the current message is a short confirmation or time specification, classify as CONFIRM_ACTION
+        - Look for patterns where the user is continuing a previous conversation about scheduling
+        - If the user mentions a time without explicit "create" or "add" keywords, but the context suggests event creation, still classify appropriately
+        
+        IMPORTANT: Detect recurring event patterns like:
+        - "every day for a week"
+        - "daily at 10am for 7 days"
+        - "gym session every day at 10am for a week"
+        - "meeting every Monday for 4 weeks"
+        - "workout every weekday"
         
         For DELETE_EVENT intent, be especially careful to extract:
         - event_id: If mentioned explicitly (like "delete event 5" or "cancel meeting 3")
@@ -64,9 +92,23 @@ class IntentClassifier:
         - event_details: Object containing any event details you extracted
         - needs_clarification: Boolean indicating if you need more information
         - clarification_question: Question to ask the user if clarification is needed
+        - context_dependent: Boolean indicating if this classification depends on conversation context
         
         Current date: {datetime.datetime.now().strftime('%Y-%m-%d')}
         Current time: {datetime.datetime.now().strftime('%H:%M')}
+        
+        Examples of CONFIRM_ACTION patterns:
+        - "yes" (when following event creation discussion)
+        - "make it 12 pm" (when modifying a proposed event time)
+        - "correct" (when confirming event details)
+        - "okay, go ahead" (when agreeing to create an event)
+        - "sure, that works" (when confirming scheduling)
+        
+        Examples of recurring event patterns:
+        - "Schedule gym every day at 10am for a week" -> CREATE_RECURRING_EVENT
+        - "Add workout session daily at 6pm for 7 days" -> CREATE_RECURRING_EVENT
+        - "Meeting every Monday at 2pm for 4 weeks" -> CREATE_RECURRING_EVENT
+        - "Book dentist appointment tomorrow at 3pm" -> CREATE_EVENT
         
         Examples of DELETE_EVENT messages:
         - "delete the basketball game"
@@ -116,7 +158,8 @@ class IntentClassifier:
                     "confidence": 0.5,
                     "event_details": {},
                     "needs_clarification": True,
-                    "clarification_question": "I'm not sure what you'd like me to do. Could you clarify?"
+                    "clarification_question": "I'm not sure what you'd like me to do. Could you clarify?",
+                    "context_dependent": False
                 }
             
             # Validate intent type
@@ -139,6 +182,14 @@ class IntentClassifier:
                 if 'end_time' in event_details and event_details['end_time']:
                     try:
                         event_details['end_time'] = self._parse_datetime(event_details['end_time'])
+                    except:
+                        # Keep as string if parsing fails
+                        pass
+                
+                # Process recurrence_end_date if present
+                if 'recurrence_end_date' in event_details and event_details['recurrence_end_date']:
+                    try:
+                        event_details['recurrence_end_date'] = self._parse_datetime(event_details['recurrence_end_date'])
                     except:
                         # Keep as string if parsing fails
                         pass
@@ -170,6 +221,10 @@ class IntentClassifier:
                     
                 result['event_details'] = event_details
             
+            # Ensure we have the context_dependent field
+            if 'context_dependent' not in result:
+                result['context_dependent'] = result.get('intent') == 'CONFIRM_ACTION'
+            
             return result
         
         except Exception as e:
@@ -180,7 +235,8 @@ class IntentClassifier:
                 "confidence": 0.5,
                 "event_details": {},
                 "needs_clarification": False,
-                "clarification_question": ""
+                "clarification_question": "",
+                "context_dependent": False
             }
     
     def _parse_datetime(self, datetime_str: str) -> datetime.datetime:
