@@ -827,6 +827,8 @@ class ConversationManager:
             
             IMPORTANT: Do NOT create phantom events or reference events that don't exist.
             Only work with events that are explicitly requested by the user or that actually exist in the database.
+            When multiple events is demanded to be deleted delete multiple events
+            When an event is to be replaced or updated replace or update the requested event accordingly and delete the unchanged event in database, create new data for updated event
             
             When responding to the user:
             1. Be concise and helpful
@@ -835,11 +837,9 @@ class ConversationManager:
             4. For general questions, be conversational and friendly
             5. Always acknowledge what you've done (or failed to do)
             6. Remember the conversation history and refer to it when appropriate
-            7. For recurring events, mention how many events were created
             8. When you create an event from context (like follow-up messages), be clear about what you created
             9. NEVER mention events that were not actually created or that don't exist
-            10. If asked to delete events, confirm the actual deletion and provide details
-            
+
             Current date: {current_date}
             Current time: {current_time}
             
@@ -1049,4 +1049,4 @@ class ConversationManager:
     def close(self):
         """Close database connections"""
         if self.db:
-            self.db.close()
+            self.db.close() 
