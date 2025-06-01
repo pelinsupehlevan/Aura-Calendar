@@ -304,6 +304,24 @@ class Database:
             print(f"Error getting event: {e}")
             raise
     
+    def find_events_by_title_and_time(self, title: str, reference_date: datetime) -> List[Dict]:
+        "Find events matching a title and near a specific date"""
+        try:
+            print(f"Searching for events with title like '{title}' near {reference_date}")
+            query = """
+                SELECT * FROM events 
+                WHERE status = 'active'
+                AND LOWER(title) LIKE LOWER(%s)
+                AND DATE(start_time) BETWEEN DATE(%s) - INTERVAL '1 day' AND DATE(%s) + INTERVAL '1 day';
+            """
+            like_pattern = f"%{title}%"
+            self.cursor.execute(query, (like_pattern, reference_date, reference_date))
+            rows = self.cursor.fetchall()
+            return [dict(row) for row in rows] if rows else []
+        except Exception as e:
+            print(f"Error finding events by title and time: {e}")
+            return []
+
     def get_events_in_range(self, start_time: datetime, end_time: datetime) -> List[Dict]:
         """Get all events within a specific time range"""
         try:

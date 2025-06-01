@@ -207,8 +207,9 @@ async def update_event(event_id: int, event: EventRequest, db: Database = Depend
         success = db.update_event(event_id, event_dict)
         
         if not success:
-            raise HTTPException(status_code=500, detail="Failed to update event")
-        
+            #raise HTTPException(status_code=500, detail="Failed to update event")
+            event_id = db.add_event(event_dict)
+
         # Try to store memory for the update if conversation manager is available
         if conversation_manager:
             try:
@@ -312,52 +313,6 @@ def check_conflicts(
     except Exception as e:
         print(f"Error checking conflicts: {e}")
         raise HTTPException(status_code=500, detail="Error checking conflicts")
-
-# @app.get("/mock-events")
-# def get_mock_events():
-#     """Test endpoint that always returns mock events"""
-    
-#     # Get current time rounded to the nearest hour
-#     now = datetime.now().replace(minute=0, second=0, microsecond=0)
-#     tomorrow = now + timedelta(days=1)
-#     day_after = now + timedelta(days=2)
-    
-#     # Create mock events
-#     events = [
-#         {
-#             "event_id": 1,
-#             "title": "Team Meeting",
-#             "description": "Weekly team sync to discuss project progress",
-#             "start_time": now.replace(hour=10, minute=0).isoformat(),
-#             "end_time": now.replace(hour=11, minute=0).isoformat(),
-#             "location": "Conference Room A",
-#             "importance": 8,
-#             "status": "active"
-#         },
-#         {
-#             "event_id": 2,
-#             "title": "Lunch with Alex",
-#             "description": "Discuss partnership opportunities",
-#             "start_time": tomorrow.replace(hour=12, minute=30).isoformat(),
-#             "end_time": tomorrow.replace(hour=13, minute=30).isoformat(),
-#             "location": "Cafe Bella",
-#             "importance": 5,
-#             "status": "active"
-#         },
-#         {
-#             "event_id": 3,
-#             "title": "Project Deadline",
-#             "description": "Submit final deliverables for client review",
-#             "start_time": day_after.isoformat(),
-#             "end_time": day_after.replace(hour=17).isoformat(),
-#             "location": "",
-#             "importance": 10,
-#             "status": "active"
-#         }
-#     ]
-    
-#     # Return with proper CORS headers
-#     return events
 
 # Simple health check endpoint
 @app.get("/health")

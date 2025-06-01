@@ -491,56 +491,6 @@ class ConversationManager:
                     response_text = "There was an issue with deleting the events. Please try again."
                     return {"text": response_text, "ui_action": None}
             
-            # Check if this might be a contextual follow-up (but be more strict)
-            contextual_action, contextual_data = await self.handle_contextual_followup(user_message)
-            
-            if contextual_action == "contextual_create":
-                print(f"Processing contextual event creation: {contextual_data}")
-                
-                # Check for conflicts
-                conflicts = self.db.check_conflicting_events(
-                    contextual_data["start_time"], 
-                    contextual_data["end_time"]
-                )
-                
-                if conflicts:
-                    print(f"Found {len(conflicts)} conflicting events for contextual creation")
-                    conflict_info = conflicts
-                    event_action = "conflict"
-                    event_data = contextual_data
-                    related_event_id = None
-                else:
-                    # No conflicts, create the event
-                    try:
-                        # Classify importance
-                        contextual_data["importance"] = await self.importance_classifier.classify_importance(
-                            contextual_data, 
-                            user_message
-                        )
-                        
-                        event_id = self.db.add_event(contextual_data)
-                        print(f"Successfully created contextual event with ID: {event_id}")
-                        contextual_data["id"] = event_id
-                        event_action = "created"
-                        event_data = contextual_data
-                        related_event_id = event_id
-                        conflict_info = None
-                        
-                        # Store memory for the event
-                        memory_content = (
-                            f"Event '{contextual_data['title']}' scheduled for "
-                            f"{contextual_data['start_time'].strftime('%Y-%m-%d %H:%M')} to "
-                            f"{contextual_data['end_time'].strftime('%Y-%m-%d %H:%M')}. "
-                            f"Importance: {contextual_data.get('importance', 5)}."
-                        )
-                        embedding = await self.get_embedding(memory_content)
-                        self.db.store_memory(event_id, memory_content, embedding)
-                    except Exception as e:
-                        print(f"Error creating contextual event: {e}")
-                        event_action = "error"
-                        event_data = None
-                        related_event_id = None
-                        conflict_info = None
             else:
                 # Classify intent normally
                 intent_data = await self.intent_classifier.classify_intent(
@@ -662,6 +612,24 @@ class ConversationManager:
                     event_details = intent_data.get("event_details", {})
                     event_id = event_details.get("event_id")
                     
+                    if not event_id and "title" in event_details:
+                        print("Attempting to resolve missing event_id using title and time...")
+                        possible_events = self.db.find_events_by_title_and_time(
+                            title=event_details["title"],
+                            reference_date=event_details.get("start_time") or datetime.now()
+                        )
+                        
+                        if len(possible_events) == 1:
+                            event_id = possible_events[0]["id"]
+                            event_details["event_id"] = event_id
+                            print(f"Resolved event_id: {event_id}")
+                        elif len(possible_events) > 1:
+                            print("Multiple events matched. Need clarification.")
+                            event_action = "needs_clarification"
+                            # Optionally send back list of candidates
+                        else:
+                            print("No matching events found.")
+                            event_action = "not_found"
                     if event_id:
                         print(f"Updating event ID: {event_id}")
                         related_event_id = event_id
@@ -707,7 +675,72 @@ class ConversationManager:
                                 event_action = "error"
                     else:
                         print("No event_id provided for update")
-                        event_action = "needs_clarification"
+                        #event_action = "needs_clarification"
+                        if intent_data.get("needs_clarification", False):
+                            # We'll handle clarification in response generation
+                            print("Needs clarification for event creation")
+                            pass
+                        else:
+                            # Extract event details and classify importance
+                            event_details = intent_data.get("event_details", {})
+                            print(f"Extracted event details: {event_details}")
+                            
+                            # Don't create events without explicit user intent
+                            if not event_details.get("title") or not event_details.get("start_time"):
+                                print("Insufficient event details, skipping creation")
+                                event_action = "needs_clarification"
+                            else:
+                                # Ensure we have both start_time and end_time
+                                if isinstance(event_details["start_time"], datetime.datetime):
+                                    # If end_time is missing, set it to 1 hour after start_time
+                                    if "end_time" not in event_details or not isinstance(event_details["end_time"], datetime.datetime):
+                                        event_details["end_time"] = event_details["start_time"] + timedelta(hours=1)
+                                    
+                                    # Classify importance if not already set
+                                    if "importance" not in event_details:
+                                        event_details["importance"] = await self.importance_classifier.classify_importance(
+                                            event_details, 
+                                            user_message
+                                        )
+                                    
+                                    # Check for conflicts BEFORE creating the event
+                                    conflicting_events = self.db.check_conflicting_events(
+                                        event_details["start_time"], 
+                                        event_details["end_time"]
+                                    )
+                                    
+                                    if conflicting_events:
+                                        print(f"Found {len(conflicting_events)} conflicting events")
+                                        conflict_info = conflicting_events
+                                        event_action = "conflict"
+                                        event_data = event_details
+                                    else:
+                                        # No conflicts, create the event
+                                        try:
+                                            event_id = self.db.add_event(event_details)
+                                            print(f"Successfully created event with ID: {event_id}")
+                                            event_details["id"] = event_id
+                                            event_action = "created"
+                                            event_data = event_details
+                                            related_event_id = event_id
+                                            
+                                            # Store memory for the event
+                                            memory_content = (
+                                                f"Event '{event_details['title']}' scheduled for "
+                                                f"{event_details['start_time'].strftime('%Y-%m-%d %H:%M')} to "
+                                                f"{event_details['end_time'].strftime('%Y-%m-%d %H:%M')}. "
+                                                f"Importance: {event_details.get('importance', 5)}. "
+                                                f"Description: {event_details.get('description', 'No description')}"
+                                            )
+                                            embedding = await self.get_embedding(memory_content)
+                                            self.db.store_memory(event_id, memory_content, embedding)
+                                        except Exception as e:
+                                            print(f"Error creating event: {e}")
+                                            event_action = "error"
+                                else:
+                                    print("Missing or invalid start_time for event creation")
+                                    event_action = "needs_clarification"
+
                     
                 elif intent_data["intent"] == "DELETE_EVENT":
                     # Handle event deletion - IMPROVED VERSION
@@ -860,7 +893,7 @@ class ConversationManager:
                     history_text += f"[{timestamp}] You: {conv['bot_response']}\n"
             
             # Determine the intent for display
-            display_intent = "CONTEXTUAL_CREATE" if contextual_action == "contextual_create" else intent_data.get("intent", "UNKNOWN")
+            display_intent =intent_data.get("intent", "UNKNOWN")
             
             # Format the prompt
             formatted_prompt = system_prompt.format(
@@ -889,8 +922,8 @@ class ConversationManager:
                 formatted_prompt += f"- Title: '{event_data['title']}'\n"
                 formatted_prompt += f"- Time: {event_data['start_time'].strftime('%Y-%m-%d %H:%M')} to {event_data['end_time'].strftime('%Y-%m-%d %H:%M')}\n"
                 formatted_prompt += f"- Importance: {event_data.get('importance', 5)}\n"
-                if contextual_action == "contextual_create":
-                    formatted_prompt += f"- Note: Created from conversation context\n"
+                #if contextual_action == "contextual_create":
+                    #formatted_prompt += f"- Note: Created from conversation context\n"
                 
             elif event_action == "created_recurring" and event_data:
                 formatted_prompt += f"\n\nSUCCESSFULLY CREATED {event_data['event_count']} RECURRING EVENTS:\n"
